@@ -1,0 +1,1685 @@
+##To reproduce entire analysis, run code in order 1:R-Functions-for-Hotspots, 2:Core-Analysis 3:Code-To-Reproduce-Figures 
+#This script is for the functions needed for the analysis associated with paper "Constitutive and tissue-specific target site preferences of the maize Mutator transposon"
+
+#R functions for HotSpot Paper: 
+
+poolTechReps_HS <- function(X) {
+  
+  samps <- sub(",T$", "", colnames(X))
+  repsamps <- unique(samps[duplicated(samps)])
+  
+  X[, repsamps] <- X[, repsamps] +
+    X[, paste0(repsamps, ",T"), drop = FALSE]
+  
+  X <- X[, !colnames(X) %in% paste0(repsamps, ",T"), drop = FALSE]
+  
+  return(X)
+}
+
+filteredCounts = function(X, thresh = 2, pseudo = 20) {
+  filter = abs(log(rowSums(X[[2]]) + pseudo, 2) - log(rowSums(X[[3]]) + pseudo, 2)) <= thresh
+  cat(sum(!filter), 'insertions filtered', sum(!filter)/length(filter), '% of total\n')
+  return(X[[1]][filter,])
+}
+
+assign2bins = function(dat, bins) { #used to call hotspots, assigns insertion locations to bins
+  bins = bins[order(bins$start),]
+  binborders = rbind(bins$start, bins$end)[1:(2*nrow(bins))]
+  assigned_bins = cut(dat, c(0,binborders,Inf), labels = c(rbind('none', rownames(bins))[1:(2*nrow(bins))], 'none'))
+  return(assigned_bins)
+}
+
+matrix2bincounts = function(mat, locations = Locs, hs = HotSpots) { #counts the number of insertions from each sample in each hotspot
+  mat = apply(mat, 2, function(xx) { (xx > 0)*locations$position })
+  mat2 = mat
+  for (chr in unique(hs$chr)) {
+    mat2[locations$chr == chr,] = apply(mat[locations$chr == chr,], 2, assign2bins, bins = hs[hs$chr == chr,])
+  }
+  mat3 = apply(mat2, 2, function(xx) { table(xx)[c('none',rownames(hs))] })
+  mat3[is.na(mat3)] = 0
+  rownames(mat3) = c('none',rownames(hs))
+  return(mat3)
+}
+
+FindHotSpots = function(locations = Locs, WindowSize = 500, EffGenomeSize = 2182075994) { #function for identifying Mu hotspots across the genome
+  out = NULL
+  Lambda=nrow(Locs)*WindowSize/EffGenomeSize
+  Threshold = qpois(10^-5, Lambda, lower.tail=F)
+  
+  for (chr in unique(locations$chr)) {
+    xx = locations$position[locations$chr == chr]
+    
+    BinnedLocs = NULL
+    for (offset in 0:(WindowSize-1)) {
+      BinnedLocs = c(BinnedLocs, floor((xx - offset)/WindowSize)*WindowSize + offset)
+    }
+    BinnedLocs = table(BinnedLocs)
+    SigBins = BinnedLocs[BinnedLocs >= Threshold]
+    
+    if (length(SigBins) > 0) {
+      
+      #### Merge Overlapping Significant Bins		
+      SigLocs = as.numeric(names(SigBins))
+      ends = which(diff(SigLocs) >= WindowSize)
+      SigLocs = data.frame(chr = chr, start = SigLocs[c(1, ends + 1)], end = SigLocs[c(ends, length(SigLocs))] + WindowSize - 1)
+      
+      
+      #### Trim Hot Spots so that they start and end on insertion
+      assigned_bins = assign2bins(xx, SigLocs)
+      SigLocs[,2:3] = t(matrix(unlist(by(xx, assigned_bins, range)[rownames(SigLocs)]), nrow = 2))
+      SigLocs$insertions = table(assigned_bins)[rownames(SigLocs)]  # Count insertions per bin
+      rownames(SigLocs) = paste(chr, rownames(SigLocs), sep = '_hs')
+      
+      out = rbind(out, SigLocs)
+      
+    }
+  }
+  
+  return(out)
+}
+
+makeHeatmap = function( chr, start, width = 100000, binsize = 500, maxenr = 500, EffGenomeSize = 2182075994) { #function for making Figure 2 heatmap
+  datasub = which((Locs[,1] == chr) & ((Locs[,2] >= start) & (Locs[,2] < (start + width))))
+  bindata = t(apply(cbind(MuCounts[datasub,]), 2, function(xx) {
+    bins = ceiling((Locs[datasub,2][xx > 0] - start + 1)/binsize)
+    bincounts = table(bins)[as.character(1:ceiling(width/binsize))]
+    bincounts[is.na(bincounts)] = 0
+    names(bincounts) = paste(chr, (1:ceiling(width/binsize) - .5)*binsize + start - 1, sep ='_')
+    bincounts
+  }))
+  
+  bindata = sweep(bindata, 1, colSums(MuCounts > 0)*(binsize/EffGenomeSize), '/')  # Scale to fold-enrichment
+  bindata[bindata > maxenr] = maxenr  # Scale everything beyond cutoff so that color palette is not dominated by rare extreme bins (which are mostly from low-depth samples)
+  
+  Heatmap(bindata, col=colorRampPalette(c("grey", "red"))(200), name="Fold Enrichment",column_title =paste(chr, start, sep = " "),cluster_columns = F, cluster_rows = F, show_column_dend = F, show_row_dend = F, show_column_names = FALSE)
+}
+
+convert=function(x){
+  lambda=(sum(dat[,i]>0)*100)/EffectiveGenomeSize
+  insertions=x*lambda
+  return(insertions)
+}
+
+
+makeFig1Heatmap = function(chr, start, width = 500, binsize = 1, maxenr = 500, EffGenomeSize = 2182075994) {
+  datasub = which((Locs[,1] == chr) & ((Locs[,2] >= start) & (Locs[,2] < (start + width))))
+  bindata = t(apply(cbind(MuCounts[datasub,c(2:3, 18:19, 24:25, 42:45)]), 2, function(xx) {
+    bins = ceiling((Locs[datasub,2][xx > 0] - start + 1)/binsize)
+    bincounts = table(bins)[as.character(1:ceiling(width/binsize))]
+    bincounts[is.na(bincounts)] = 0
+    names(bincounts) = paste(chr, (1:ceiling(width/binsize) - .5)*binsize + start - 1, sep ='_')
+    bincounts
+  }))
+  
+  Heatmap(bindata, col=colorRampPalette(c("grey", "black"))(200), name="Fold Enrichment",column_title =paste(chr, start, sep = " "),cluster_columns = F, cluster_rows = F, show_column_dend = F, show_row_dend = F, show_column_names = FALSE)
+}
+
+convert=function(x){
+  lambda=(sum(dat[,i]>0)*100)/EffectiveGenomeSize
+  insertions=x*lambda
+  return(insertions)
+}
+
+
+makeBrowser = function(chr, start, end, width = 10000, EffGenomeSize = 2182075994, WindowSize=500, lengthfudge = 0) {
+  startat = (round((mean(c(start,end)) - width/2)/500)*500) + lengthfudge
+  datasub = which((Locs[,1] == chr) & ((Locs[,2] >= startat) & (Locs[,2] <= (startat + width))))
+  dat=MuCounts
+  dat1=matrix(data=NA, ncol = 4, nrow=nrow(MuCounts))
+  colnames(dat1)=c("Endosperm","Root","Leaf","Pollen")
+  Leaf=rowSums(dat[,grepl("L",colnames(dat))])
+  Root=rowSums(dat[,grepl("R",colnames(dat))])
+  Pollen=rowSums(dat[,grepl("P",colnames(dat))])
+  Endosperm=rowSums(dat[,grepl("E",colnames(dat))])
+  dat1=cbind(Endosperm, Root, Leaf, Pollen)
+  lambda = colSums(dat1 > 0)*WindowSize/EffGenomeSize
+  dat1=dat1[datasub,]
+  dat1=as.data.frame(dat1)
+  position=as.numeric(sub('.+,','',rownames(dat1)))
+  dat1$position = position
+  mat = apply(dat1[,1:4], 2, function(yy) { sapply(startat:(startat+width), function(xx) { sum(abs(dat1$position[yy > 0] - xx) <= WindowSize/2) }) })
+  mat = sweep(mat, 2, lambda, '/')
+  
+  cols=c('#67536cff','#a05a2cff','#73b47cec','#ffd42aff')
+  Tissue=c("Endosperm","Root",'Leaf',"Pollen")
+  par(mfrow=c(4,1))
+  par(mar=c(1.25, 4.1, 0.5, 2.1))
+  for (i in 1:4){
+    bp=barplot(mat[,i], border = NA, space = 0, col = cols[i], xaxs = 'i', ylim = c(0,ceiling(max(mat)/50)*50), axisnames = F, main=Tissue[i], axes = F)
+    axis(1, at=bp[c(1,nrow(bp)),1],labels =NA, tick = T, lwd = .5)
+    axis(2, at=c(0,ceiling(max(mat)/50)*50),tick = T, las = 2, lwd = .5)
+  }
+  abline(v=bp[start-startat,])
+  abline(v=bp[end-startat,])
+  axis(1, at=c(bp[1,], bp[nrow(bp),]), labels=c(startat, startat+width), lwd=.5)
+}
+
+
+makeBrowser2 = function(
+    HSid,
+    tissues = c("Leaf", "Root", "Pollen", "Endosperm"),
+    width = 10000,
+    EffGenomeSize = 2182075994,
+    WindowSize = 500,
+    lengthfudge = 0,
+    show_heatmap = TRUE
+) {
+  
+  ## Grab hotspot
+  hs <- HotSpots[HSid, ]
+  
+  ## Center browser on hotspot
+  center <- mean(c(hs$start, hs$end))
+  startat <- round((center - width/2) / 500) * 500 + lengthfudge
+  
+  ## Mu insertions in browser window
+  datasub <- which(
+    Locs[,1] == hs$chr &
+      Locs[,2] >= startat &
+      Locs[,2] <= (startat + width)
+  )
+  
+  dat <- MuCounts
+  
+  ## Sum insertion counts by tissue
+  dat1 <- cbind(
+    Leaf      = rowSums(dat[, grepl("L", colnames(dat))]),
+    Root      = rowSums(dat[, grepl("R", colnames(dat))]),
+    Pollen    = rowSums(dat[, grepl("P", colnames(dat))]),
+    Endosperm = rowSums(dat[, grepl("E", colnames(dat))])
+  )
+  
+  ## Keep requested tissues in requested order
+  dat1 <- dat1[, tissues, drop = FALSE]
+  
+  ## Genome-wide expected insertion density
+  lambda <- colSums(dat1 > 0) * WindowSize / EffGenomeSize
+  
+  ## Restrict to browser window
+  dat1 <- as.data.frame(dat1[datasub, , drop = FALSE])
+  dat1$position <- as.numeric(sub(".+,", "", rownames(dat1)))
+  
+  ## Rolling window
+  mat <- apply(
+    dat1[, tissues, drop = FALSE],
+    2,
+    function(yy) {
+      sapply(
+        startat:(startat + width),
+        function(xx) {
+          sum(abs(dat1$position[yy > 0] - xx) <= WindowSize/2)
+        }
+      )
+    }
+  )
+  
+  ## Preserve matrix if only one tissue
+  if(length(tissues) == 1)
+    mat <- matrix(mat, ncol = 1)
+  
+  ## Normalize to fold enrichment
+  mat <- sweep(mat, 2, lambda, "/")
+  
+  ## Tissue colors
+  tissue.cols <- c(
+    Leaf      = "#73b47cec",
+    Root      = "#a05a2cff",
+    Pollen    = "#ffd42aff",
+    Endosperm = "#67536cff"
+  )
+  
+  cols <- tissue.cols[tissues]
+  
+  ymax <- max(
+    50,
+    ceiling(max(mat, na.rm = TRUE) / 50) * 50
+  )
+  
+  ## ==========================================================
+  ## Layout
+  ## ==========================================================
+  
+  ntracks <- length(tissues)
+  
+  if(show_heatmap) {
+    layout(
+      cbind(
+        seq_len(ntracks),
+        rep(ntracks + 1, ntracks)
+      ),
+      widths = c(5, 1.2)
+    )
+  } else {
+    layout(
+      matrix(seq_len(ntracks), ncol = 1),
+      widths = 1
+    )
+  }
+  
+  ## ==========================================================
+  ## Browser tracks
+  ## ==========================================================
+  
+  par(mar = c(1.25, 4.1, .5, 1))
+  
+  n <- nrow(mat)
+  
+  ## Bar centers
+  bp <- seq_len(n) - 0.5
+  
+  ## Hotspot boundaries relative to browser window
+  hs_left <- max(0, hs$start - startat)
+  hs_right <- min(n, hs$end - startat + 1)
+  
+  for(i in seq_along(tissues)) {
+    
+    ## Initialize plotting region
+    plot(
+      NA,
+      xlim = c(0, n),
+      ylim = c(0, ymax),
+      xaxs = "i",
+      yaxs = "i",
+      axes = FALSE,
+      xlab = "",
+      ylab = "",
+      main = tissues[i]
+    )
+    
+    ## Gray shading behind called hotspot
+    if(hs_left < hs_right) {
+      rect(
+        xleft = hs_left,
+        ybottom = 0,
+        xright = hs_right,
+        ytop = ymax,
+        col = adjustcolor("grey70", alpha.f = 0.35),
+        border = NA
+      )
+    }
+    
+    ## Insertion density bars
+    rect(
+      xleft = seq_len(n) - 1,
+      ybottom = 0,
+      xright = seq_len(n),
+      ytop = mat[, i],
+      col = cols[i],
+      border = NA
+    )
+    
+    ## X-axis ticks
+    axis(
+      1,
+      at = bp[c(1, n)],
+      labels = NA,
+      tick = TRUE,
+      lwd = .5
+    )
+    
+    ## Y-axis ticks
+    axis(
+      2,
+      at = c(0, ymax),
+      las = 2,
+      tick = TRUE,
+      lwd = .5
+    )
+  }
+  
+  ## Genomic coordinate labels
+  axis(
+    1,
+    at = bp[c(1, n)],
+    labels = c(startat, startat + width),
+    lwd = .5
+  )
+  
+  ## ==========================================================
+  ## ATAC / RNA heatmap
+  ## ==========================================================
+  
+  if(show_heatmap) {
+    
+    hm.cols <- colorRampPalette(c(
+      "#67536c",
+      "white",
+      "#73b47c"
+    ))(201)
+    
+    par(mar = c(3, 2, 3, 2))
+    
+    ## Raw values
+    raw.vals <- rbind(
+      Endosperm = c(
+        hs$Endosperm_ATAC_Score,
+        hs$Expr_Endosperm
+      ),
+      Leaf = c(
+        hs$Leaf_ATAC_Score,
+        hs$Expr_Leaf
+      )
+    )
+    
+    colnames(raw.vals) <- c("ATAC", "RNA")
+    
+    ## Same statistic as scaleTMP()
+    bias <- c(
+      diff(raw.vals[, "ATAC"]) / max(raw.vals[, "ATAC"]),
+      diff(raw.vals[, "RNA"]) / max(raw.vals[, "RNA"])
+    )
+    
+    zmat <- t(matrix(bias, nrow = 1))
+    
+    image(
+      x = 1:2,
+      y = 1,
+      z = zmat,
+      col = hm.cols,
+      zlim = c(-1, 1),
+      axes = FALSE,
+      xlab = "",
+      ylab = ""
+    )
+    
+    box()
+    
+    axis(
+      3,
+      at = 1:2,
+      labels = c("ATAC", "RNA"),
+      tick = FALSE,
+      cex.axis = .9
+    )
+    
+    mtext(
+      "Bias",
+      side = 2,
+      line = .5,
+      las = 2,
+      cex = .9
+    )
+    
+    par(xpd = NA)
+    
+    for(i in 1:2) {
+      text(
+        i,
+        .60,
+        labels = sprintf("%.2f", bias[i]),
+        cex = .85,
+        font = 2
+      )
+    }
+    
+    title(
+      main = HSid,
+      line = .5,
+      cex.main = .9
+    )
+  }
+}
+  
+
+
+
+
+makeHeatmapTop = function(i, width = 40000) {
+  makeHeatmap(HotSpots2[i,1], round(HotSpots2[i,2] - width/2), width)
+}
+
+#adding statistical measurements to hotspots2
+score = function(xx) {
+  -ppois(xx[1] - 1, xx[2]*(nrow(MuCounts)/EffectiveGenomeSize), lower.tail=F, log.p=T)
+}
+
+logtransform = function(xx, pc=1){
+  log10(xx + pc) - log10(pc)
+}
+
+CategorizeExp2 <- function(
+    hs,
+    tissuematch = grepl("Endosperm", colnames(Genes_pooled)),
+    lowthresh = 0.1,
+    specthresh = log10(2)
+){
+  
+  ## Keep only genes present in the expression matrix
+  hs2 <- hs[hs$GeneID %in% rownames(Genes_pooled), ]
+  
+  ## Raw pooled expression
+  GeneDat <- Genes_pooled[hs2$GeneID, , drop = FALSE]
+  
+  ## Poor expression (<0.1 FPKM on average)
+  PoorExpr <- rowMeans(GeneDat) < lowthresh
+  
+  ## Log-transform for downstream calculations
+  GeneDat <- logtransform(GeneDat,pc=0.1)
+  
+  
+  ## Convert logical tissue selection to column indices
+  if(is.logical(tissuematch))
+    tissuematch <- which(tissuematch)
+  
+  
+
+  
+  ## Poor expression (<0.1 FPKM in every tissue)
+  
+  
+  ## Tissue specificity score
+  if(length(tissuematch) > 1){
+    
+    tisScore <-
+      apply(GeneDat[, tissuematch], 1, max) -
+      apply(GeneDat[, -tissuematch], 1, max)
+    
+  } else {
+    
+    tisScore <-
+      GeneDat[, tissuematch] -
+      apply(GeneDat[, -tissuematch], 1, max)
+    
+  }
+  
+  ## Base classification
+  Agreement <-
+    c("Discordant",
+      "MultiTissue_Expression",
+      "Concordant_Expression")[
+        1 +
+          (tisScore >= -specthresh) +
+          (tisScore >  specthresh)
+      ]
+  
+  
+  ## Poor expression overrides everything
+  Agreement[PoorExpr] <- "Poor"
+  
+  ## Return in the same order as the input hotspots
+  out <- data.frame(
+    Agreement = Agreement,
+    row.names = rownames(hs2)
+  )
+  
+  out <- out[
+    match(rownames(hs), rownames(out)),
+    ,
+    drop = FALSE
+  ]
+  
+  rownames(out) <- rownames(hs)
+  
+  return(out)
+}
+
+
+HS_Exp_heatmap2 = function(hs,show_row_names=F) {
+  
+  ## Keep only genes present in expression matrix
+  present <- hs$GeneID %in% rownames(Genes)
+  
+  cat(
+    "Genes absent from expression matrix:\n",
+    hs$GeneID[!present],
+    "\n"
+  )
+  
+  hs <- hs[present,,drop=FALSE]
+  
+  ## Mu FE
+  MuDat <- hs[,c(
+    "Endosperm_FoldEnrichment",
+    "Leaf_FoldEnrichment",
+    "Pollen_FoldEnrichment",
+    "Root_FoldEnrichment"
+  )]
+  
+  colnames(MuDat) <- sub("_FoldEnrichment","",colnames(MuDat))
+  
+  ## Gene expression
+  GeneDat <- logtransform(
+    Genes[hs$GeneID,,drop=FALSE]
+  )
+  
+  hm1 <- Heatmap(
+    GeneDat,
+    column_names_gp=gpar(fontsize=6),
+    row_names_gp=gpar(fontsize=6),
+    cluster_rows=T,
+    clustering_method_rows="ward.D2",
+    show_row_names=show_row_names,
+    show_row_dend=T,
+    show_column_dend=T,
+    row_names_rot=T,
+    column_order=TissueOrders,
+    col=turbo(100),
+    row_title_gp=gpar(fontsize=8),
+    row_title_rot=360,
+    split=hs$Heatmap.grouping
+  )
+  
+  hm2 <- Heatmap(
+    MuDat,
+    col=colorRamp2(
+      seq(0,100,length.out=5),
+      c("#F7F2F2","#E8C9C9","#D58A8A","#8B0015","#5A000D")
+    ),
+    cluster_columns=F,
+    show_row_names=F,
+    split=hs$Heatmap.grouping
+  )
+  
+  if(show_row_names) hm2+hm1 else hm1+hm2
+}
+
+makeFig5PlotInfo <- function(
+    HotSpots,
+    Mu_SpecificFC=4,
+    Gray_MinFE=20,
+    Gray_MaxDiff=1.5,
+    Expr_Min=.1,
+    Expr_EqualFC=2,
+    Expr_SpecificFC=10,
+    ATAC_TrendTau=c(.25,.75),
+    ATAC_SpecificTau=c(.10,.90),
+    CircleShape=19
+){
+  
+  eps <- 1e-6
+  
+  ATAC_Taus <- sort(unique(c(
+    ATAC_SpecificTau,
+    .50,
+    ATAC_TrendTau
+  )))
+  
+  ## Ratios
+  MuRatio <- (
+    HotSpots$Endosperm_FoldEnrichment + eps
+  ) / (
+    HotSpots$Leaf_FoldEnrichment + eps
+  )
+  
+  ExprRatio <- (
+    HotSpots$Expr_Endosperm + eps
+  ) / (
+    HotSpots$Expr_Leaf + eps
+  )
+  
+  ATACRatio <- (
+    HotSpots$Endosperm_ATAC_Score + eps
+  ) / (
+    HotSpots$Leaf_ATAC_Score + eps
+  )
+  
+  ## Build PlotInfo
+  PlotInfo <- data.frame(
+    
+    id=rownames(HotSpots),
+    
+    ## Mu
+    Significant=
+      !is.na(HotSpots$FDRts) &
+      HotSpots$FDRts <= .01,
+    
+    MuEndo=HotSpots$Endosperm_FoldEnrichment,
+    MuLeaf=HotSpots$Leaf_FoldEnrichment,
+    MuRatio=MuRatio,
+    MuLog2Ratio=log2(MuRatio),
+    
+    MaxMuFE=pmax(
+      HotSpots$Endosperm_FoldEnrichment,
+      HotSpots$Leaf_FoldEnrichment,
+      na.rm=TRUE
+    ),
+    
+    FoldDiff=
+      pmax(
+        HotSpots$Endosperm_FoldEnrichment,
+        HotSpots$Leaf_FoldEnrichment,
+        na.rm=TRUE
+      ) /
+      pmin(
+        HotSpots$Endosperm_FoldEnrichment,
+        HotSpots$Leaf_FoldEnrichment,
+        na.rm=TRUE
+      ),
+    
+    ## Expression
+    ExprEndo=HotSpots$Expr_Endosperm,
+    ExprLeaf=HotSpots$Expr_Leaf,
+    ExprRatio=ExprRatio,
+    ExprLog2Ratio=log2(ExprRatio),
+    
+    ## ATAC
+    ATACEndo=HotSpots$Endosperm_ATAC_Score,
+    ATACLeaf=HotSpots$Leaf_ATAC_Score,
+    ATACRatio=ATACRatio,
+    ATACLog2Ratio=log2(ATACRatio),
+    
+    ## Annotation
+    TSS_distance=HotSpots$TSS_distance,
+    TSS_count=HotSpots$TSS_count,
+    Gene_assignment=HotSpots$Gene_assignment,
+    
+    stringsAsFactors=FALSE
+  )
+  
+  rownames(PlotInfo) <- PlotInfo$id
+  
+  
+  ## Plot eligibility
+  PlotInfo$Plot <-
+    PlotInfo$Gene_assignment == "genic" &
+    !is.na(HotSpots$TSS_distance) &
+    PlotInfo$TSS_distance <= 500 &
+    !is.na(PlotInfo$ExprEndo) &
+    !is.na(PlotInfo$ATACEndo)
+  
+  PlotInfo$pch <- CircleShape
+  
+  
+  ## ATAC quantile regression
+  library(quantreg)
+  
+  Keep <- PlotInfo$Plot & PlotInfo$pch != 1
+  
+  ATAC_All <- data.frame(
+    logLeaf=log10(PlotInfo$ATACLeaf[Keep]+1),
+    logEndo=log10(PlotInfo$ATACEndo[Keep]+1)
+  )
+  
+  ATAC_All$M <- (
+    ATAC_All$logLeaf +
+      ATAC_All$logEndo
+  ) / 2
+  
+  ATAC_All$D <-
+    ATAC_All$logEndo -
+    ATAC_All$logLeaf
+  
+  ATAC_Fit <- rq(
+    D ~ M,
+    tau=ATAC_Taus,
+    data=ATAC_All
+  )
+  
+  
+  ## Expression classification
+  MissingExpr <-
+    is.na(PlotInfo$ExprEndo) |
+    is.na(PlotInfo$ExprLeaf)
+  
+  LowExpr <-
+    !MissingExpr &
+    PlotInfo$ExprLeaf +
+    PlotInfo$ExprEndo < Expr_Min
+  
+  PlotInfo$ExprState <- NA_character_
+  
+  PlotInfo$ExprState[LowExpr] <- "Low"
+  
+  PlotInfo$ExprState[
+    !MissingExpr & !LowExpr
+  ] <- "Equal"
+  
+  PlotInfo$ExprState[
+    !MissingExpr &
+      !LowExpr &
+      PlotInfo$ExprEndo >
+      Expr_EqualFC * PlotInfo$ExprLeaf
+  ] <- "TrendEndosperm"
+  
+  PlotInfo$ExprState[
+    !MissingExpr &
+      !LowExpr &
+      PlotInfo$ExprEndo >
+      Expr_SpecificFC * PlotInfo$ExprLeaf
+  ] <- "Endosperm"
+  
+  PlotInfo$ExprState[
+    !MissingExpr &
+      !LowExpr &
+      PlotInfo$ExprLeaf >
+      Expr_EqualFC * PlotInfo$ExprEndo
+  ] <- "TrendLeaf"
+  
+  PlotInfo$ExprState[
+    !MissingExpr &
+      !LowExpr &
+      PlotInfo$ExprLeaf >
+      Expr_SpecificFC * PlotInfo$ExprEndo
+  ] <- "Leaf"
+  
+  
+  ## Mu classification
+  PlotInfo$MuClass <- NA_character_
+  
+  Consistent <-
+    PlotInfo$MaxMuFE >= Gray_MinFE &
+    PlotInfo$FoldDiff <= Gray_MaxDiff
+  
+  PlotInfo$MuClass[Consistent] <- "Consistent"
+  
+  PlotInfo$MuClass[
+    PlotInfo$Significant &
+      PlotInfo$MuRatio >= Mu_SpecificFC
+  ] <- "Endosperm"
+  
+  PlotInfo$MuClass[
+    PlotInfo$Significant &
+      PlotInfo$MuRatio <= 1/Mu_SpecificFC
+  ] <- "Leaf"
+  
+  PlotInfo$MuState <- PlotInfo$MuClass
+  
+  
+  ## Predict ATAC quantiles
+  Pred <- predict(
+    ATAC_Fit,
+    newdata=data.frame(M=ATAC_All$M)
+  )
+  
+  colnames(Pred) <- paste0(
+    "tau",
+    gsub(
+      "\\.",
+      "",
+      sprintf("%.2f",ATAC_Taus)
+    )
+  )
+  
+  Pred <- as.data.frame(Pred)
+  
+  LowerSpecific <- Pred[[
+    paste0(
+      "tau",
+      gsub("\\.","",sprintf("%.2f",ATAC_SpecificTau[1]))
+    )
+  ]]
+  
+  LowerTrend <- Pred[[
+    paste0(
+      "tau",
+      gsub("\\.","",sprintf("%.2f",ATAC_TrendTau[1]))
+    )
+  ]]
+  
+  UpperTrend <- Pred[[
+    paste0(
+      "tau",
+      gsub("\\.","",sprintf("%.2f",ATAC_TrendTau[2]))
+    )
+  ]]
+  
+  UpperSpecific <- Pred[[
+    paste0(
+      "tau",
+      gsub("\\.","",sprintf("%.2f",ATAC_SpecificTau[2]))
+    )
+  ]]
+  
+  
+  ## ATAC classification
+  PlotInfo$ATACState <- NA_character_
+  
+  PlotRows <- which(Keep)
+  
+  PlotInfo$ATACState[
+    PlotRows[
+      ATAC_All$D >= LowerTrend &
+        ATAC_All$D <= UpperTrend
+    ]
+  ] <- "Equal"
+  
+  PlotInfo$ATACState[
+    PlotRows[
+      ATAC_All$D > UpperTrend &
+        ATAC_All$D <= UpperSpecific
+    ]
+  ] <- "TrendEndosperm"
+  
+  PlotInfo$ATACState[
+    PlotRows[
+      ATAC_All$D > UpperSpecific
+    ]
+  ] <- "Endosperm"
+  
+  PlotInfo$ATACState[
+    PlotRows[
+      ATAC_All$D < LowerTrend &
+        ATAC_All$D >= LowerSpecific
+    ]
+  ] <- "TrendLeaf"
+  
+  PlotInfo$ATACState[
+    PlotRows[
+      ATAC_All$D < LowerSpecific
+    ]
+  ] <- "Leaf"
+  
+  
+  ## Factor levels
+  ExprLevels <- c(
+    "Endosperm",
+    "TrendEndosperm",
+    "Equal",
+    "TrendLeaf",
+    "Leaf",
+    "Low"
+  )
+  
+  ATACLevels <- c(
+    "Endosperm",
+    "TrendEndosperm",
+    "Equal",
+    "TrendLeaf",
+    "Leaf"
+  )
+  
+  MuLevels <- c(
+    "Endosperm",
+    "Consistent",
+    "Leaf"
+  )
+  
+  PlotInfo$ExprState <- factor(
+    PlotInfo$ExprState,
+    levels=ExprLevels
+  )
+  
+  PlotInfo$ATACState <- factor(
+    PlotInfo$ATACState,
+    levels=ATACLevels
+  )
+  
+  PlotInfo$MuState <- factor(
+    PlotInfo$MuState,
+    levels=MuLevels
+  )
+  
+  PlotInfo
+}
+
+
+makeFig5Scatter <- function(X, pc=1, mx=NULL, pch=19, ConsistentCol="lightgray",EndoCol="#67536cff",LeafCol="#73b47cec"){
+  
+  PlotDat <- PlotInfo[PlotInfo$Plot,]
+  if(is.null(mx)) mx <- 10^ceiling(log10(max(X,na.rm=TRUE)))
+  
+  ## Background
+  ConsistentIDs <- rownames(PlotDat)[PlotDat$MuClass=="Consistent"]
+  
+  plot(
+    logtransform(X[ConsistentIDs,1],pc),
+    logtransform(X[ConsistentIDs,2],pc),
+    pch=pch,
+    cex=1,
+    col=ConsistentCol,
+    xlab=colnames(X)[1],
+    ylab=colnames(X)[2],
+    xaxt="n",
+    yaxt="n",
+    xlim=logtransform(c(0,mx),pc),
+    ylim=logtransform(c(0,mx),pc)
+  )
+  
+  ## Axes
+  mx.exp <- ceiling(log10(mx))
+  major.breaks <- c(0,10^(0:mx.exp))
+  
+  axis(1,at=logtransform(major.breaks,pc),labels=major.breaks,lwd=2)
+  axis(2,at=logtransform(major.breaks,pc),labels=major.breaks,lwd=2)
+  
+  if(mx.exp>=1){
+    minor.breaks <- unlist(lapply(0:(mx.exp-1),function(i)(2:9)*10^i))
+    minor.breaks <- minor.breaks[minor.breaks<mx]
+    
+    axis(1,at=logtransform(minor.breaks,pc),labels=FALSE)
+    axis(2,at=logtransform(minor.breaks,pc),labels=FALSE)
+  }
+  
+  ## Points
+  pts <- PlotDat[!is.na(PlotDat$MuState),]
+  pts$x <- X[pts$id,1]
+  pts$y <- X[pts$id,2]
+  
+  pts$col <- c(
+    Consistent=ConsistentCol,
+    Endosperm=EndoCol,
+    Leaf=LeafCol
+  )[pts$MuClass]
+  
+  pts$cex <- ifelse(pts$MuClass=="Consistent",1,1.7)
+  
+  gray <- pts[pts$MuClass=="Consistent",]
+  sig <- pts[pts$MuClass!="Consistent",]
+  
+  set.seed(2)
+  if(nrow(sig)>1) sig <- sig[sample(nrow(sig)),]
+  
+  points(
+    logtransform(gray$x,pc),
+    logtransform(gray$y,pc),
+    pch=gray$pch,
+    col=gray$col,
+    cex=gray$cex
+  )
+  
+  points(
+    logtransform(sig$x,pc),
+    logtransform(sig$y,pc),
+    pch=sig$pch,
+    col=sig$col,
+    cex=sig$cex
+  )
+  
+  ## Legend
+  legend(
+    "top",
+    legend=c(
+      "Consistent",
+      "Endosperm-enriched",
+      "Leaf-enriched"
+    ),
+    col=c(
+      ConsistentCol,
+      EndoCol,
+      LeafCol
+    ),
+    pch=pch,
+    pt.cex=.5,
+    bty="n",
+    title="Mu hotspot"
+  )
+}
+
+DrawExpressionBoundaries <- function(){
+  
+  theta <- seq(0,pi/2,length.out=500)
+  
+  lines(
+    log10(Expr_Min*cos(theta)+1),
+    log10(Expr_Min*sin(theta)+1),
+    lwd=.8,
+    col=BoundaryCol
+  )
+  
+  DrawBoundary <- function(fc,lty){
+    
+    x0 <- Expr_Min/sqrt(1+fc^2)
+    x <- seq(x0,1000,length.out=1000)
+    y <- fc*x
+    
+    lines(
+      log10(x+1),
+      log10(y+1),
+      lwd=ifelse(lty==1,1.2,.8),
+      lty=lty,
+      col="gray50"
+    )
+    
+    lines(
+      log10(y+1),
+      log10(x+1),
+      lwd=ifelse(lty==1,1.2,.8),
+      lty=lty,
+      col=BoundaryCol
+    )
+  }
+  
+  DrawBoundary(Expr_EqualFC,2)
+  DrawBoundary(Expr_SpecificFC,1)
+}
+
+PlotFig5ExpressionScatter <- function(bands=FALSE){
+  
+  makeFig5Scatter(
+    HotSpots[,c("Expr_Leaf","Expr_Endosperm")],
+    pc=1,
+    mx=1200
+  )
+  
+  if(bands)
+    DrawExpressionBoundaries()
+}
+
+PlotFig5ATACScatter <- function(bands=FALSE){
+  
+  makeFig5Scatter(
+    HotSpots[,c("Leaf_ATAC_Score","Endosperm_ATAC_Score")],
+    pc=1,
+    mx=100
+  )
+  
+  if(bands){
+    
+    taus <- sort(unique(Bands$tau))
+    
+    for(i in seq_along(taus)){
+      
+      x <- Bands[Bands$tau==taus[i],]
+      
+      lines(
+        x$logLeaf,
+        x$logEndo,
+        col=BoundaryCol,
+        lwd=ifelse(taus[i]==.5,1.2,.8),
+        lty=ifelse(taus[i]==.5,1,2)
+      )
+    }
+  }
+}
+
+PlotH3K36me3Scatter <- function(){
+  
+  makeFig5Scatter(
+    HotSpots[,c("Leaf_H3K36me3_Score","Endosperm_H3K36me3_Score")],
+    pc=1,
+    mx=100
+  )
+}
+
+PlotFigS7StateHeatmap <- function(Mu){
+  ExprLevels <-
+    c(
+      "Endosperm",
+      "TrendEndosperm",
+      "Equal",
+      "TrendLeaf",
+      "Leaf",
+      "Low"
+    )
+  
+  ATACLevels <-
+    c(
+      "Endosperm",
+      "TrendEndosperm",
+      "Equal",
+      "TrendLeaf",
+      "Leaf"
+    )
+  
+  MuLevels <-
+    c(
+      "Endosperm",
+      "Consistent",
+      "Leaf"
+    )
+  
+  PlotInfo$ExprState <-
+    factor(
+      PlotInfo$ExprState,
+      levels = ExprLevels
+    )
+  
+  PlotInfo$ATACState <-
+    factor(
+      PlotInfo$ATACState,
+      levels = ATACLevels
+    )
+  
+  PlotInfo$MuState <-
+    factor(
+      PlotInfo$MuState,
+      levels = MuLevels
+    )
+  
+  StateTable <-
+    with(
+      PlotInfo[PlotInfo$Plot, ],
+      table(
+        ExprState,
+        ATACState,
+        MuState
+      )
+    )
+  
+  ##########################################################
+  ## Order of categories
+  ##########################################################
+  
+  ExprOrder <- c(
+    "Endosperm",
+    "TrendEndosperm",
+    "Equal",
+    "TrendLeaf",
+    "Leaf",
+    "Low"
+  )
+  
+  ATACOrder <- c(
+    "Endosperm",
+    "TrendEndosperm",
+    "Equal",
+    "TrendLeaf",
+    "Leaf"
+  )
+  
+  ##########################################################
+  ## Build table
+  ##########################################################
+  
+  PlotSubset <-
+    PlotInfo[
+      PlotInfo$Plot &
+        PlotInfo$MuState == Mu,
+    ]
+  
+  mat <-
+    with(
+      PlotSubset,
+      table(
+        factor(
+          ExprState,
+          levels = ExprLevels
+        ),
+        factor(
+          ATACState,
+          levels = ATACLevels
+        )
+      )
+    )
+  ##########################################################
+  ## Heatmap colors
+  ##########################################################
+  
+  col_fun <- colorRamp2(
+    c(
+      0,
+      max(mat) / 2,
+      max(mat)
+    ),
+    c(
+      "#F7F7F7",
+      "#F4A582",
+      "#CA0020"
+    )
+  )
+  
+  ##########################################################
+  ## Plot
+  ##########################################################
+  
+  Heatmap(
+    mat,
+    width = unit(ncol(mat) * 8, "mm"),
+    height = unit(nrow(mat) * 8, "mm"),
+    
+    name = "Count",
+    
+    col = col_fun,
+    
+    cluster_rows = FALSE,
+    cluster_columns = FALSE,
+    
+    rect_gp = gpar(col = "white"),
+    
+    row_title = "Expression",
+    column_title =
+      switch(
+        Mu,
+        Endosperm = "Endosperm-enriched hotspots",
+        Consistent = "Consistent hotspots",
+        Leaf = "Leaf-enriched hotspots"
+      ),
+    
+    column_names_rot = 45,
+    
+    cell_fun = function(
+    j,
+    i,
+    x,
+    y,
+    width,
+    height,
+    fill
+    ){
+      
+      if(mat[i,j] > 0)
+        grid.text(
+          mat[i,j],
+          x,
+          y,
+          gp = gpar(fontsize = 10)
+        )
+      
+    },
+    
+    column_title_gp =
+      gpar(
+        fontsize = 13,
+        fontface = "bold"
+      ),
+    
+    heatmap_legend_param =
+      list(
+        title_gp = gpar(fontface = "bold")
+      )
+  )
+}
+
+makeBrowser3 = function(
+    HSid,
+    width = 10000,
+    EffGenomeSize = 2182075994,
+    WindowSize = 500,
+    methylation = NULL
+) {
+  
+  ## Grab hotspot
+  hs <- HotSpots[HSid, ]
+  
+  ## Center browser on hotspot
+  center <- mean(c(hs$start, hs$end))
+  startat <- round((center - width/2) / 500) * 500
+  endat <- startat + width
+  
+  
+  ############################################################
+  ## Mu insertion data
+  ############################################################
+  
+  dat <- MuCounts
+  
+  dat1 <- cbind(
+    Endosperm = rowSums(dat[, grepl("E", colnames(dat))]),
+    Leaf      = rowSums(dat[, grepl("L", colnames(dat))])
+  )
+  
+  ## Lambda for Mu fold enrichment
+  lambda <- colSums(dat1 > 0) * WindowSize / EffGenomeSize
+  
+  ## Restrict Mu insertions to browser region
+  datasub <- which(
+    Locs[,1] == hs$chr &
+      Locs[,2] >= startat &
+      Locs[,2] <= endat
+  )
+  
+  dat1 <- as.data.frame(dat1[datasub, , drop = FALSE])
+  
+  dat1$position <- as.numeric(
+    sub(".+,", "", rownames(dat1))
+  )
+  
+  
+  ## Rolling Mu window
+  mat <- apply(
+    dat1[, c("Endosperm", "Leaf"), drop = FALSE],
+    2,
+    function(yy) {
+      sapply(
+        startat:endat,
+        function(xx) {
+          sum(abs(dat1$position[yy > 0] - xx) <= WindowSize/2)
+        }
+      )
+    }
+  )
+  
+  if(is.null(dim(mat)))
+    mat <- matrix(mat, ncol = 2)
+  
+  ## Convert to fold enrichment
+  mat <- sweep(mat, 2, lambda, "/")
+  
+  
+  ############################################################
+  ## ATAC data
+  ############################################################
+  
+  ## Extract ATAC coverage for chromosome
+  atacE <- covE[[hs$chr]]
+  atacL <- covL[[hs$chr]]
+  
+  ## Restrict to browser region
+  atacE <- window(
+    atacE,
+    start = startat,
+    end = endat
+  )
+  
+  atacL <- window(
+    atacL,
+    start = startat,
+    end = endat
+  )
+  
+  ## Convert Rle to numeric vectors
+  atacE <- as.numeric(atacE)
+  atacL <- as.numeric(atacL)
+  
+  
+  ############################################################
+  ## Methylation data -- OPTIONAL
+  ############################################################
+  
+  if (!is.null(methylation)) {
+    
+    methsub <- methylation[
+      as.character(seqnames(methylation)) == hs$chr &
+        start(methylation) >= startat &
+        start(methylation) < endat
+    ]
+    
+    ## Convert methylation percentage to colors
+    meth.cols <- colorRampPalette(
+      c("white", "darkgray", "black")
+    )(101)
+    
+    meth.col <- meth.cols[
+      round(methsub$methylation) + 1
+    ]
+  }
+  
+  
+  ############################################################
+  ## Plot settings
+  ############################################################
+  
+  tissue.cols <- c(
+    Endosperm = "#67536c",
+    Leaf      = "#73b47c"
+  )
+  
+  ## Common y-axis for Mu
+  mu.ymax <- ceiling(
+    max(mat, na.rm = TRUE) / 50
+  ) * 50
+  
+  ## Common y-axis for ATAC
+  atac.ymax <- ceiling(
+    max(c(atacE, atacL), na.rm = TRUE) / 5
+  ) * 5
+  
+  
+  ############################################################
+  ## Layout
+  ############################################################
+  
+  if (is.null(methylation)) {
+    
+    layout(
+      matrix(
+        1:4,
+        ncol = 1
+      ),
+      heights = c(1, 1, 1, 1)
+    )
+    
+  } else {
+    
+    layout(
+      matrix(
+        1:5,
+        ncol = 1
+      ),
+      heights = c(1, 1, 1, 1, 0.35)
+    )
+  }
+  
+  
+  ############################################################
+  ## Leaf Mu
+  ############################################################
+  
+  par(
+    mar = c(0.5, 4.1, 1.2, 1)
+  )
+  
+  bp <- barplot(
+    mat[, "Leaf"],
+    border = NA,
+    space = 0,
+    col = tissue.cols["Leaf"],
+    xaxs = "i",
+    ylim = c(0, mu.ymax),
+    axisnames = FALSE,
+    main = paste0(
+      "Leaf Mu (FPKM = ",
+      sprintf("%.2f", hs$Expr_Leaf),
+      ")"
+    ),
+    axes = FALSE
+  )
+  
+  ## Black baseline
+  abline(
+    h = 0,
+    col = "black",
+    lwd = 0.8
+  )
+  
+  axis(
+    2,
+    at = c(0, mu.ymax),
+    las = 2,
+    tick = TRUE,
+    lwd = .5
+  )
+  
+  
+  ############################################################
+  ## Endosperm Mu
+  ############################################################
+  
+  par(
+    mar = c(0.5, 4.1, 1.2, 1)
+  )
+  
+  bp <- barplot(
+    mat[, "Endosperm"],
+    border = NA,
+    space = 0,
+    col = tissue.cols["Endosperm"],
+    xaxs = "i",
+    ylim = c(0, mu.ymax),
+    axisnames = FALSE,
+    main = paste0(
+      "Endosperm Mu (FPKM = ",
+      sprintf("%.2f", hs$Expr_Endosperm),
+      ")"
+    ),
+    axes = FALSE
+  )
+  
+  ## Black baseline
+  abline(
+    h = 0,
+    col = "black",
+    lwd = 0.8
+  )
+  
+  axis(
+    2,
+    at = c(0, mu.ymax),
+    las = 2,
+    tick = TRUE,
+    lwd = .5
+  )
+  
+  
+  ############################################################
+  ## Leaf ATAC
+  ############################################################
+  
+  par(
+    mar = c(0.5, 4.1, 1.2, 1)
+  )
+  
+  plot(
+    startat:endat,
+    atacL,
+    type = "l",
+    lwd = 1,
+    col = tissue.cols["Leaf"],
+    xaxs = "i",
+    ylim = c(0, atac.ymax),
+    axes = FALSE,
+    xlab = "",
+    ylab = "",
+    main = "Leaf ATAC"
+  )
+  
+  polygon(
+    c(startat:endat, endat:startat),
+    c(atacL, rep(0, length(atacL))),
+    col = tissue.cols["Leaf"],
+    border = NA
+  )
+  
+  lines(
+    startat:endat,
+    atacL,
+    col = tissue.cols["Leaf"],
+    lwd = 1
+  )
+  
+  ## Black baseline
+  abline(
+    h = 0,
+    col = "black",
+    lwd = 0.8
+  )
+  
+  axis(
+    2,
+    at = c(0, atac.ymax),
+    las = 2,
+    tick = TRUE,
+    lwd = .5
+  )
+  
+  
+  ############################################################
+  ## Endosperm ATAC
+  ############################################################
+  
+  par(
+    mar = c(
+      if (is.null(methylation)) 3 else 0.5,
+      4.1,
+      1.2,
+      1
+    )
+  )
+  
+  plot(
+    startat:endat,
+    atacE,
+    type = "l",
+    lwd = 1,
+    col = tissue.cols["Endosperm"],
+    xaxs = "i",
+    ylim = c(0, atac.ymax),
+    axes = FALSE,
+    xlab = "",
+    ylab = "",
+    main = "Endosperm ATAC"
+  )
+  
+  polygon(
+    c(startat:endat, endat:startat),
+    c(atacE, rep(0, length(atacE))),
+    col = tissue.cols["Endosperm"],
+    border = NA
+  )
+  
+  lines(
+    startat:endat,
+    atacE,
+    col = tissue.cols["Endosperm"],
+    lwd = 1
+  )
+  
+  ## Black baseline
+  abline(
+    h = 0,
+    col = "black",
+    lwd = 0.8
+  )
+  
+  ## Shared genomic x-axis
+  if (is.null(methylation)) {
+    
+    axis(
+      1,
+      at = c(startat, endat),
+      labels = c(startat, endat),
+      lwd = .5
+    )
+  }
+  
+  axis(
+    2,
+    at = c(0, atac.ymax),
+    las = 2,
+    tick = TRUE,
+    lwd = .5
+  )
+  
+  
+  ############################################################
+  ## DNA methylation -- OPTIONAL
+  ############################################################
+  
+  if (!is.null(methylation)) {
+    
+    par(
+      mar = c(3, 4.1, 1.2, 1)
+    )
+    
+    plot(
+      NA,
+      xlim = c(startat, endat),
+      ylim = c(0, 1),
+      xaxs = "i",
+      yaxs = "i",
+      axes = FALSE,
+      xlab = "",
+      ylab = "",
+      main = "DNA Methylation"
+    )
+    
+    ## Draw 10-bp methylation bins
+    rect(
+      xleft = start(methsub),
+      xright = end(methsub),
+      ybottom = 0,
+      ytop = 1,
+      col = meth.col,
+      border = NA
+    )
+    
+    ## Genomic x-axis
+    axis(
+      1,
+      at = c(startat, endat),
+      labels = c(startat, endat),
+      lwd = .5
+    )
+    
+    ## Methylation axis
+    axis(
+      2,
+      at = c(0, 1),
+      labels = c("0", "100"),
+      las = 2,
+      tick = TRUE,
+      lwd = .5
+    )
+  }
+  
+  
+  ############################################################
+  ## Figure title
+  ############################################################
+  
+  title(
+    main = HSid,
+    line = .5,
+    cex.main = .9
+  )
+}

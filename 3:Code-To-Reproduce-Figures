@@ -1,0 +1,2421 @@
+######code to reproduce figures######
+##To reproduce entire analysis, run code in order 1:R-Functions-for-Hotspots, 2:Core-Analysis 3:Code-To-Reproduce-Figures 
+##load dependencies
+library(ComplexHeatmap)
+library(viridis)
+library(circlize)
+library(ggplot2)
+library(rtracklayer)
+
+###################
+#                 #
+#   Section 1     #
+#                 #
+###################
+
+##Figure 1 Insertion Sites in a 500 bp window
+makeFig1Heatmap = function(
+    chr,
+    start,
+    width = 500,
+    binsize = 1,
+    maxenr = 500,
+    EffGenomeSize = 2182075994
+) {
+  
+  ############################################################
+  ## Identify insertion sites in the window
+  ############################################################
+  
+  datasub = which(
+    Locs$chr == chr &
+      Locs$position >= start &
+      Locs$position < (start + width)
+  )
+  
+  
+  ############################################################
+  ## Samples to plot in heatmap
+  ## MI samples intentionally retained as negative controls
+  ############################################################
+  
+  samples = c(2:3, 18:19, 24:25, 42:45)
+  
+  ############################################################
+  ## Mu-active samples for pooled FE calculations
+  ## Exclude MI samples
+  ############################################################
+  
+  active_samples = which(!grepl("_MI$", colnames(MuCounts)))
+  
+  
+  ############################################################
+  ## Remove inherited insertion sites from heatmap
+  ############################################################
+  
+  datasub = datasub[
+    !rownames(MuCounts)[datasub] %in% AllInherited
+  ]
+  
+  ############################################################
+  ## Make heatmap data
+  ############################################################
+  
+  bindata = t(apply(
+    MuCounts[datasub, samples, drop = FALSE],
+    2,
+    function(xx) {
+      
+      bins = ceiling(
+        (Locs$position[datasub][xx > 0] - start + 1) / binsize
+      )
+      
+      bincounts = table(bins)[
+        as.character(1:ceiling(width / binsize))
+      ]
+      
+      bincounts[is.na(bincounts)] = 0
+      
+      names(bincounts) = paste(
+        chr,
+        (1:ceiling(width / binsize) - .5) * binsize + start - 1,
+        sep = "_"
+      )
+      
+      bincounts
+    }
+  ))
+  
+  
+  ############################################################
+  ## Individual-sample FE
+  ## Used for the values reported in the figure
+  ############################################################
+  
+  n_insertions = colSums(
+    MuCounts[datasub, , drop = FALSE] > 0
+  )
+  
+  total_insertions = colSums(
+    MuCounts[, , drop = FALSE] > 0
+  )
+  
+  FE = n_insertions / (
+    total_insertions * (width / EffGenomeSize)
+  )
+  
+  
+  ############################################################
+  ## Statistics dataframe
+  ############################################################
+  
+  stats = data.frame(
+    Sample = colnames(MuCounts),
+    Tissue = sub(
+      ".*_",
+      "",
+      colnames(MuCounts)
+    ),
+    Insertions = n_insertions,
+    TotalInsertions = total_insertions,
+    FoldEnrichment = FE,
+    row.names = NULL
+  )
+  
+  print(stats)
+  
+  
+  ############################################################
+  ## Pooled FE across Mu-active samples
+  ## MI samples are excluded
+  ############################################################
+  
+  pooled_insertions = sum(
+    n_insertions[active_samples]
+  )
+  
+  pooled_total_insertions = sum(
+    total_insertions[active_samples]
+  )
+  
+  pooled_FE = pooled_insertions / (
+    pooled_total_insertions *
+      (width / EffGenomeSize)
+  )
+  
+  mean_insertions = pooled_insertions / length(active_samples)
+  
+  
+  cat(
+    "\nPooled Mu-active FE:",
+    pooled_FE,
+    "\n"
+  )
+  
+  cat(
+    "Total Mu-active insertion observations:",
+    pooled_insertions,
+    "\n"
+  )
+  
+  cat(
+    "Mean insertion sites per Mu-active sample:",
+    mean_insertions,
+    "\n"
+  )
+  
+  
+  ############################################################
+  ## Heatmap
+  ############################################################
+  
+  ht = Heatmap(
+    bindata,
+    col = colorRampPalette(c("grey", "black"))(200),
+    name = "Insertion Site",
+    column_title = paste(chr, start, sep = " "),
+    cluster_columns = F,
+    cluster_rows = F,
+    show_column_dend = F,
+    show_row_dend = F,
+    show_column_names = FALSE
+  )
+  
+  draw(ht)
+  
+  
+  ############################################################
+  ## Return statistics
+  ############################################################
+  
+  return(stats)
+}
+Fig1=makeFig1Heatmap(chr="chr7", start=13584500)
+
+################
+################
+# ============================================================
+# Supplemental Figure S2
+# ============================================================
+
+library(ggplot2)
+
+EffGenomeSize <- 2182075994
+
+# ============================================================
+# 1. Calculate FE in genomic windows
+# ============================================================
+
+getFE <- function(d1, d2, w = 500, s = 500) {
+  
+  getloc <- function(d) {
+    x <- do.call(rbind, strsplit(rownames(d), "[:,]"))
+    data.frame(
+      chr = x[, 1],
+      pos = rowMeans(matrix(as.numeric(x[, 2:3]), ncol = 2))
+    )
+  }
+  
+  l1 <- getloc(d1)
+  l2 <- getloc(d2)
+  
+  d1 <- d1 > 0
+  d2 <- d2 > 0
+  
+  lam1 <- colSums(d1) * w / EffGenomeSize
+  lam2 <- colSums(d2) * w / EffGenomeSize
+  
+  get <- function(d, l, lam, chr, centers) {
+    i <- l$chr == chr
+    mat <- matrix(0, length(centers), ncol(d))
+    
+    for (j in seq_len(ncol(d))) {
+      ins <- sort(l$pos[i][d[i, j]])
+      
+      if (length(ins))
+        mat[, j] <-
+          findInterval(centers + w / 2, ins, left.open = TRUE) -
+          findInterval(centers - w / 2, ins, left.open = TRUE)
+    }
+    
+    sweep(mat, 2, lam, "/")
+  }
+  
+  chrs <- union(unique(l1$chr), unique(l2$chr))
+  out1 <- out2 <- list()
+  
+  for (chr in chrs) {
+    p <- c(l1$pos[l1$chr == chr], l2$pos[l2$chr == chr])
+    centers <- seq(min(p), max(p), by = s)
+    
+    out1[[chr]] <- get(d1, l1, lam1, chr, centers)
+    out2[[chr]] <- get(d2, l2, lam2, chr, centers)
+  }
+  
+  data.frame(
+    setNames(list(
+      as.numeric(do.call(rbind, out1)[, 1]),
+      as.numeric(do.call(rbind, out2)[, 1])
+    ), c(colnames(d1), colnames(d2))),
+    check.names = FALSE
+  )
+}
+
+
+# ============================================================
+# 2. FE scatter plot: 500 bp windows
+# ============================================================
+
+sample_pair <- c("D58-75_L", "D58-78_L")
+
+LeafPair <- MuCounts[, sample_pair, drop = FALSE]
+LeafPair <- LeafPair[
+  rowSums(LeafPair) > 0 &
+    !rownames(LeafPair) %in% AllInherited,
+  ,
+  drop = FALSE
+]
+
+FE500 <- getFE(LeafPair[, 1, drop = FALSE],
+               LeafPair[, 2, drop = FALSE],
+               w = 500, s = 500)
+
+# ---- Plot settings ----
+log_scale <- FALSE
+pseudocount <- 100
+nbin <- 100
+point_size <- 1
+
+x_raw <- FE500[[1]]
+y_raw <- FE500[[2]]
+
+keep <- is.finite(x_raw) & is.finite(y_raw)
+x_raw <- x_raw[keep]
+y_raw <- y_raw[keep]
+
+joint_zero <- x_raw == 0 & y_raw == 0
+idx <- which(!joint_zero)
+
+if (log_scale) {
+  x <- log10(x_raw + pseudocount)
+  y <- log10(y_raw + pseudocount)
+  axis_lab <- paste0("log10(FE + ", pseudocount, ")")
+  zero_coord <- log10(pseudocount)
+} else {
+  x <- x_raw
+  y <- y_raw
+  axis_lab <- "FE"
+  zero_coord <- 0
+}
+
+# ---- 2D density ----
+make_breaks <- function(z, n) {
+  r <- range(z, finite = TRUE)
+  if (diff(r) == 0) r <- r + c(-.5, .5)
+  seq(r[1], r[2], length.out = n + 1)
+}
+
+xb <- make_breaks(x[idx], nbin)
+yb <- make_breaks(y[idx], nbin)
+
+ix <- pmax(1L, pmin(nbin, findInterval(x[idx], xb)))
+iy <- pmax(1L, pmin(nbin, findInterval(y[idx], yb)))
+
+density <- tabulate(
+  (ix - 1L) * nbin + iy,
+  nbins = nbin^2
+)[(ix - 1L) * nbin + iy]
+
+# Log density + sqrt transformation expands low-density colors
+z <- log10(density)
+z <- (z - min(z)) / diff(range(z))
+z <- sqrt(z)
+
+pal <- colorRampPalette(c(
+  "#2166AC", "#67A9CF", "#F7F7F7",
+  "#FDAE61", "#B2182B"
+))(100)
+
+point_col <- pal[1 + round(99 * z)]
+
+r <- cor(x, y)
+
+# ---- Scatter plot ----
+layout(matrix(c(1, 2), 2), heights = c(10, .8))
+
+par(mar = c(4.5, 4.5, 3, 1))
+
+plot(
+  x, y,
+  type = "n",
+  xlab = paste0(colnames(FE500)[1], " (", axis_lab, ")"),
+  ylab = paste0(colnames(FE500)[2], " (", axis_lab, ")"),
+  main = "Leaf replicate consistency — 500 bp windows"
+)
+
+ord <- order(density)
+
+points(
+  x[idx][ord],
+  y[idx][ord],
+  pch = 16,
+  cex = point_size,
+  col = point_col[ord]
+)
+
+if (any(joint_zero))
+  points(zero_coord, zero_coord,
+         pch = 16, cex = point_size, col = pal[100])
+
+legend(
+  "topleft",
+  legend = c(
+    paste0("r = ", round(r, 3)),
+    paste0("R² = ", round(r^2, 3))
+  ),
+  bty = "n"
+)
+
+# ---- Density color bar ----
+par(mar = c(1, 4.5, .5, 1))
+
+image(
+  seq(0, 1, length.out = length(pal)),
+  c(0, 1),
+  matrix(seq_along(pal), nrow = length(pal)),
+  col = pal,
+  axes = FALSE,
+  xlab = "", ylab = ""
+)
+
+mtext("Lower density", 1, -.2, 0, adj = 0, cex = .8)
+mtext("Higher density", 1, -.2, 1, adj = 1, cex = .8)
+
+layout(1)
+
+
+# ============================================================
+# 3. Calculate mean R² by tissue and window size
+# ============================================================
+
+pairwiseR2 <- function(MuCounts, samples, WindowSize) {
+  
+  d <- MuCounts[, samples, drop = FALSE] > 0
+  keep <- rowSums(d) > 0 & !rownames(d) %in% AllInherited
+  d <- d[keep, , drop = FALSE]
+  
+  x <- do.call(rbind, strsplit(rownames(d), "[:,]"))
+  chr <- x[, 1]
+  pos <- rowMeans(matrix(as.numeric(x[, 2:3]), ncol = 2))
+  
+  nsamp <- ncol(d)
+  sums <- numeric(nsamp)
+  cross <- matrix(0, nsamp, nsamp)
+  nwin <- 0
+  
+  for (cc in unique(chr)) {
+    
+    ii <- which(chr == cc)
+    p <- pos[ii]
+    centers <- seq(min(p), max(p), by = WindowSize)
+    
+    ins <- lapply(seq_len(nsamp), function(j)
+      sort(p[d[ii, j]])
+    )
+    
+    counts <- matrix(0, length(centers), nsamp)
+    
+    for (j in seq_len(nsamp)) {
+      if (length(ins[[j]]))
+        counts[, j] <-
+          findInterval(centers + WindowSize / 2,
+                       ins[[j]], left.open = TRUE) -
+          findInterval(centers - WindowSize / 2,
+                       ins[[j]], left.open = TRUE)
+    }
+    
+    nwin <- nwin + nrow(counts)
+    sums <- sums + colSums(counts)
+    cross <- cross + crossprod(counts)
+  }
+  
+  centered <- cross - tcrossprod(sums) / nwin
+  r <- centered / sqrt(outer(diag(centered), diag(centered)))
+  r2 <- r[upper.tri(r)]^2
+  
+  mean(r2, na.rm = TRUE)
+}
+
+
+Highdepth <- colnames(HScounts)[
+  colSums(HScounts[-1, , drop = FALSE]) > 15000 &
+    !grepl("MI", colnames(HScounts))
+]
+
+tissues <- c(E = "Endosperm",
+             L = "Leaf",
+             P = "Pollen",
+             R = "Root")
+
+window_sizes <- c(250,500,1000, 2000, 5000)
+
+R2_tissue <- do.call(rbind, lapply(names(tissues), function(tissue) {
+  
+  samples <- grep(
+    paste0("_", tissue, "$"),
+    Highdepth,
+    value = TRUE
+  )
+  
+  data.frame(
+    Tissue = tissue,
+    WindowSize = window_sizes,
+    N_samples = length(samples),
+    Mean_R2 = sapply(
+      window_sizes,
+      function(w) pairwiseR2(MuCounts, samples, w)
+    )
+  )
+}))
+
+R2_tissue$Tissue <- factor(
+  R2_tissue$Tissue,
+  levels = names(tissues),
+  labels = tissues
+)
+
+
+# ============================================================
+# 4. R² line plot
+# ============================================================
+
+cols <- c(
+  Endosperm = "#67536c",
+  Leaf      = "#73b47c",
+  Root      = "#a05a2c",
+  Pollen    = "#ffd42a"
+)
+
+ggplot(
+  R2_tissue,
+  aes(
+    x = WindowSize,
+    y = Mean_R2,
+    color = Tissue,
+    group = Tissue
+  )
+) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 3) +
+  scale_color_manual(values = cols) +
+  scale_x_continuous(
+    breaks = window_sizes,
+    labels = c("250bp","500bp","1 kb", "2 kb", "5 kb")
+  ) +
+  scale_y_continuous(
+    limits = c(0, max(R2_tissue$Mean_R2)*1.05)
+  ) +
+  labs(
+    x = "Window size",
+    y = expression(R^2),
+    color = "Tissue"
+  ) +
+  theme_classic()
+
+################
+################
+
+
+###################
+#                 #
+#   Section 2     #
+#                 #
+###################
+##Figure 2 Mu Fold enrichment in 100kb windows across samples clusters into hotspots
+##Figure 2 heatmap
+makeHeatmap(chr='chr7',start=2000000, width=100000) #makeHeatmap function is in the R-functions script
+
+start = 2000000
+width = 100000
+chr = "chr7"
+binsize = 500
+EffGenomeSize = 2182075994
+
+############################################################
+## Mu-active samples only
+############################################################
+
+active_samples = which(!grepl("_MI$", colnames(MuCounts)))
+
+############################################################
+## Window
+############################################################
+
+datasub = which(
+  Locs$chr == chr &
+    Locs$position >= start &
+    Locs$position < start + width
+)
+
+nbins = ceiling(width / binsize)
+
+############################################################
+## Count insertions in each bin across Mu-active samples
+############################################################
+
+bin_counts = colSums(
+  t(sapply(
+    active_samples,
+    function(j) {
+      
+      bins = ceiling(
+        (Locs$position[datasub][
+          MuCounts[datasub, j] > 0
+        ] - start + 1) / binsize
+      )
+      
+      tabulate(bins, nbins = nbins)
+    }
+  ))
+)
+
+############################################################
+## Pooled fold enrichment
+############################################################
+
+total_insertions = sum(
+  MuCounts[, active_samples, drop = FALSE] > 0
+)
+
+FE = bin_counts / (
+  total_insertions *
+    (binsize / EffGenomeSize)
+)
+
+############################################################
+## Plot
+############################################################
+
+plotDat = data.frame(
+  x = seq_len(nbins),
+  FE = FE
+)
+
+ggplot(
+  plotDat,
+  aes(x = x, y = FE)
+) +
+  geom_line() +
+  theme_classic() +
+  labs(
+    x = "500 bp bin",
+    y = "Fold enrichment"
+  )
+
+##Supplemental Figure S3 Histogram of Mu insertion distances
+###making Mu inserts into hotspots rouhgly 2kb in size figure
+mx = 10^5
+diffs = rep(0, mx)
+names(diffs) = 1:mx
+for (chr in unique(Locs[,1])[1:10]) {
+  xx = Locs[Locs[,1] == chr,2]
+  go = T
+  i = 1
+  while (go) {
+    xx2 = diff(xx, lag = i)
+    diffs = colSums(rbind(diffs, table(xx2)[names(diffs)]), na.rm=T)
+    if (min(xx2) >= mx) { go = F }
+    i = i + 1
+  }
+}
+d2 = diffs
+diffs = rep(as.numeric(names(d2)),d2)
+
+scalefactor = 1/choose(nrow(Locs),2)/200*10^8
+mx = ceiling(sum(d2[1:200])*scalefactor)
+
+hs = hist(diffs[diffs <= 8*10^3], xlim=c(0,5000),breaks = 50, border=NA, col='#555555', xlab = 'Distance between neighboring insertions (bp)', ylab = 'Probability (x 10^-8)', yaxt = 'n', ylim = c(0,mx/scalefactor), main = NA)  #### Fig
+axis(2, at = seq(0, mx, ceiling(mx/5))/scalefactor, labels = seq(0, mx, ceiling(mx/5)), las = 2)
+#####
+#####
+###Genes with hotspots tend to be larger than genes without hotspots
+library(GenomicRanges)
+library(rtracklayer)
+library(ggplot2)
+
+GenesGR = import(
+  "~/Desktop/Coding/Genomes/Zm-B73-REFERENCE-NAM-5.0_Zm00001eb.1.gff3.gz"
+)
+GenesGR = GenesGR[GenesGR$type == "gene"]
+
+GeneDat = data.frame(
+  GeneID = GenesGR$ID,
+  GeneLength = width(GenesGR),
+  HasHotspot = GenesGR$ID %in% unique(HotspotsGR$GeneID)
+)
+
+GeneDat = GeneDat[!is.na(GeneDat$GeneLength),]
+
+# Wilcoxon test
+WilcoxResult = wilcox.test(GeneLength ~ HasHotspot, data=GeneDat)
+WilcoxResult
+
+# Summary
+aggregate(GeneLength ~ HasHotspot, GeneDat,
+          function(x) c(n=length(x),mean=mean(x),median=median(x)))
+
+# Plot
+ggplot(GeneDat,aes(HasHotspot,GeneLength)) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=.15,alpha=.1,size=.5) +
+  scale_y_log10() +
+  scale_x_discrete(labels=c("FALSE"="No hotspot","TRUE"="Has hotspot")) +
+  theme_classic() +
+  labs(x=NULL,y="Gene length (bp)")
+
+
+#######
+#######
+
+###################
+#                 #
+#   Section 3     #
+#                 #
+###################
+
+##Figure 3A tissue-associated hotspots heatmap
+### Includes insertions inside AND outside hotspots
+total_insertions <- colSums(HScounts) #use all reads for FE measurement
+
+#calculate samples level fold enrichment
+FE_HScounts <- CalculateFE(
+  HScounts2,
+  total_insertions,
+  HotSpots,
+  EffectiveGenomeSize
+)
+
+logFE_HScounts <- log10(FE_HScounts + 50)
+### Significant hotspots, samples with >15k insertions
+############################################################
+
+plotsamps <- names(
+  total_insertions[total_insertions > 15000]
+)
+
+sig <- rownames(res)[res$FDR <= 0.01]
+
+mat_FE <- logFE_HScounts[
+  intersect(rownames(logFE_HScounts), sig),
+  plotsamps,
+  drop = FALSE
+]
+
+tissue_hm <- factor(
+  sub(".*_", "", colnames(mat_FE)),
+  levels = c("L", "R", "P", "E")
+)
+
+### Order samples by insertion number within tissue
+sample_order <- unlist(
+  lapply(levels(tissue_hm), function(z) {
+    samps <- colnames(mat_FE)[tissue_hm == z]
+    samps[order(total_insertions[samps], decreasing = TRUE)]
+  })
+)
+
+mat_FE <- mat_FE[, sample_order, drop = FALSE]
+
+tissue_hm <- factor(
+  sub(".*_", "", colnames(mat_FE)),
+  levels = c("L", "R", "P", "E")
+)
+
+limits <- quantile(
+  mat_FE - log10(50),
+  probs = c(0, 0.95),
+  na.rm = TRUE
+)
+
+col <- circlize::colorRamp2(
+  seq(limits[1], limits[2], length.out = 100),
+  colorRampPalette(
+    c("#0571B0", "#92C5DE", "#F7F7F7", "#F4A582", "#CA0020")
+  )(100)
+)
+
+set.seed(1)
+
+hm <- draw(
+  Heatmap(
+    mat_FE - log10(50),
+    name = "log10(Fold Enrichment)",
+    clustering_method_rows = "ward.D2",
+    row_dend_reorder = FALSE,
+    row_km = 20,
+    show_row_names = FALSE,
+    show_row_dend = TRUE,
+    show_column_dend = FALSE,
+    column_split = tissue_hm,
+    cluster_columns = FALSE,
+    col = col
+  )
+)
+##Figure 3B Example of a endosperm-associated hotspot (Opaque endosperm 11)
+makeBrowser2(HSid = "chr2_hs1716",show_heatmap = F, width=10000) #makeBrowser2 function can be found in R-functions script
+
+##Figure 3C Example of a pollen-associated hotspot (Silky1)
+makeBrowser2(HSid="chr6_hs798", show_heatmap = F, width=10000) #makeBrowser2 function can be found in R-functions script
+
+
+##FigureS4A: Showing all samples from figure 3A with sample depth
+### Full dataset, all non-MI samples
+### Same significant hotspots as main heatmap
+############################################################
+
+sig <- rownames(res)[res$FDR <= 0.01]
+
+mat_FE_s1 <- logFE_HScounts[
+  intersect(rownames(logFE_HScounts), sig),
+  !grepl("MI", colnames(logFE_HScounts)),
+  drop = FALSE
+]
+
+### Tissue labels
+tissue_s1 <- factor(
+  sub(".*_", "", colnames(mat_FE_s1)),
+  levels = c("L", "R", "P", "E")
+)
+
+### Order samples by total insertions within tissue
+sample_order_s1 <- unlist(
+  lapply(levels(tissue_s1), function(z) {
+    samps <- colnames(mat_FE_s1)[tissue_s1 == z]
+    samps[order(total_insertions[samps], decreasing = TRUE)]
+  })
+)
+
+mat_FE_s1 <- mat_FE_s1[, sample_order_s1, drop = FALSE]
+
+tissue_s1 <- factor(
+  sub(".*_", "", colnames(mat_FE_s1)),
+  levels = c("L", "R", "P", "E")
+)
+
+ha_s1 <- HeatmapAnnotation(
+  Total_Insertions = anno_barplot(
+    total_insertions[colnames(mat_FE_s1)],
+    border = FALSE,
+    gp = gpar(fill = "grey40")
+  )
+)
+
+limits_s1 <- quantile(
+  mat_FE_s1 - log10(50),
+  probs = c(0.02, 0.90),
+  na.rm = TRUE
+)
+
+col_s1 <- circlize::colorRamp2(
+  seq(limits_s1[1], limits_s1[2], length.out = 100),
+  colorRampPalette(
+    c("#0571B0", "#92C5DE", "#F7F7F7", "#F4A582", "#CA0020")
+  )(100)
+)
+
+
+main_orders <- row_order(hm)
+
+row_split_main <- integer(nrow(mat_FE))
+
+for (i in seq_along(main_orders)) {
+  row_split_main[main_orders[[i]]] <- i
+}
+
+names(row_split_main) <- rownames(mat_FE)
+row_split_s1 <- row_split_main[rownames(mat_FE_s1)]
+
+row_split_s1 <- factor(
+  row_split_s1,
+  levels = sort(unique(row_split_s1))
+)
+
+set.seed(1)
+hm_s1 <- draw(
+  Heatmap(
+    mat_FE_s1 - log10(50),
+    row_split=row_split_s1,
+    row_order=unlist(row_order(hm)),
+    name = "log10(Fold Enrichment)",
+    row_dend_reorder = FALSE,
+    show_row_names = FALSE,
+    show_row_dend = TRUE,
+    show_column_dend = FALSE,
+    column_split = tissue_s1,
+    cluster_columns = FALSE,
+    top_annotation = ha_s1,
+    col = col_s1
+  )
+)
+
+
+##Figure S4B: Figure 3A is robust to group sizes (6 matched samples across 4 tissues)
+############################################################
+### Random downsampling: 6 samples per tissue
+### E/L/P: >15k insertions
+### R: all available samples
+############################################################
+
+set.seed(1)
+## edgeR library size
+### Matches the original analysis: excludes "none"
+lib_size <- colSums(
+  HScounts[-1, , drop = FALSE]
+)
+nonMI <- !grepl("MI", colnames(HScounts2))
+
+samples <- colnames(HScounts2)[nonMI]
+
+high_depth <- samples[
+  total_insertions[samples] > 15000
+]
+
+eligible <- list(
+  E = high_depth[grepl("_E$", high_depth)],
+  L = high_depth[grepl("_L$", high_depth)],
+  P = high_depth[grepl("_P$", high_depth)],
+  R = samples[grepl("_R$", samples)]
+)
+
+stopifnot(all(sapply(eligible, length) >= 6))
+
+selected_ds <- unlist(
+  lapply(eligible, sample, size = 6)
+)
+
+selected_ds
+
+############################################################
+### Downsampled statistics
+############################################################
+
+res_ds <- RunHotspotStats(
+  HScounts2[, selected_ds, drop = FALSE],
+  lib_size[selected_ds]
+)
+
+cat(
+  "6/tissue balanced dataset - hotspots > 2-fold at FDR 0.01:",
+  sum(res_ds$FDR <= 0.01),
+  "\n"
+)
+
+
+############################################################
+### Supplemental heatmap 2
+### 6 samples per tissue
+### E/L/P: >15k insertions
+### R: all available
+############################################################
+
+sig_ds <- rownames(res_ds)[res_ds$FDR <= 0.01]
+
+mat_FE_s2 <- logFE_HScounts[
+  intersect(rownames(logFE_HScounts), sig_ds),
+  selected_ds,
+  drop = FALSE
+]
+
+### Tissue labels
+tissue_s2 <- factor(
+  sub(".*_", "", colnames(mat_FE_s2)),
+  levels = c("L", "R", "P", "E")
+)
+
+### Order samples by total insertions within tissue
+sample_order_s2 <- unlist(
+  lapply(levels(tissue_s2), function(z) {
+    samps <- colnames(mat_FE_s2)[tissue_s2 == z]
+    samps[order(total_insertions[samps], decreasing = TRUE)]
+  })
+)
+
+mat_FE_s2 <- mat_FE_s2[, sample_order_s2, drop = FALSE]
+
+tissue_s2 <- factor(
+  sub(".*_", "", colnames(mat_FE_s2)),
+  levels = c("L", "R", "P", "E")
+)
+
+ha_s2 <- HeatmapAnnotation(
+  Total_Insertions = anno_barplot(
+    total_insertions[colnames(mat_FE_s2)],
+    border = FALSE,
+    gp = gpar(fill = "grey40")
+  )
+)
+
+limits_s2 <- quantile(
+  mat_FE_s2 - log10(50),
+  probs = c(0.02, 0.98),
+  na.rm = TRUE
+)
+
+col_s2 <- circlize::colorRamp2(
+  seq(limits_s2[1], limits_s2[2], length.out = 100),
+  colorRampPalette(
+    c("#0571B0", "#92C5DE", "#F7F7F7", "#F4A582", "#CA0020")
+  )(100)
+)
+
+set.seed(1)
+
+hm_s2 <- draw(
+  Heatmap(
+    mat_FE_s2 - log10(50),
+    name = "log10(Fold Enrichment)",
+    clustering_method_rows = "ward.D2",
+    row_dend_reorder = FALSE,
+    row_km = 15,
+    show_row_names = FALSE,
+    show_row_dend = TRUE,
+    show_column_dend = FALSE,
+    column_split = tissue_s2,
+    cluster_columns = FALSE,
+    top_annotation = ha_s2,
+    col = col_s2
+  )
+)
+
+
+
+
+###################
+#                 #
+#   Section 4     #
+#                 #
+###################
+##Figure 4A Tissue Correlation Heatmap
+#CORRELATIONHEATMAP
+load("Genes_FPKMNormalized_9-29-26.rda")
+
+keep <-
+  HotSpots$Gene_assignment == "genic" &
+  !is.na(HotSpots$TSS_distance) &
+  abs(HotSpots$TSS_distance) <= 500 &
+  !is.na(HotSpots$FDRts) &
+  HotSpots$FDRts <= 0.01  #keeping tissue-associated, single gene TSS localized hotspots
+
+# ============================================================
+# Build matched Mu and expression matrices
+# ============================================================
+
+FE_cols <- c(
+  "Endosperm_FoldEnrichment",
+  "Leaf_FoldEnrichment",
+  "Pollen_FoldEnrichment",
+  "Root_FoldEnrichment"
+)
+
+# Selected hotspots
+SelectedHS <- HotSpots[keep, , drop = FALSE]
+
+# Unique hotspot identifiers
+HS.ID <- rownames(SelectedHS)
+
+# Mu fold enrichment: one row per hotspot
+MuFE <- as.matrix(
+  SelectedHS[, FE_cols, drop = FALSE]
+)
+
+# Match each hotspot to its associated gene
+gene_idx <- match(
+  SelectedHS$GeneIDs,
+  rownames(Genes)
+)
+
+# Gene expression: one row per hotspot
+# Multiple hotspots associated with the same gene
+# will retrieve the same expression profile.
+GenesCor <- as.matrix(
+  Genes[gene_idx, , drop = FALSE]
+)
+
+# Use hotspot IDs as rownames in BOTH matrices
+rownames(MuFE) <- HS.ID
+rownames(GenesCor) <- HS.ID
+
+
+# ============================================================
+# Remove hotspots with missing Mu fold enrichment
+# ============================================================
+
+complete_FE <- complete.cases(MuFE)
+
+MuFE <- MuFE[complete_FE, , drop = FALSE]
+GenesCor <- GenesCor[complete_FE, , drop = FALSE]
+
+# Confirm matching rows and order
+stopifnot(
+  identical(rownames(MuFE), rownames(GenesCor))
+)
+
+######## correlation heatmap ########
+
+TissueOrders <- colnames(Genes)
+TissueOrders <- TissueOrders[
+  c(1:12, 23:29, 40:42,
+    16:22, 37:39,
+    30:36, 13:15)
+]
+
+row_minmax <- function(x) {
+  (x - min(x, na.rm = TRUE)) /
+    (max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
+}
+
+cor_TA <- cor(
+  log(MuFE + 1),
+  log(GenesCor + 0.1),
+  use = "pairwise.complete.obs"
+)
+
+cor_TA_scaled <- t(apply(cor_TA, 1, row_minmax))
+
+Heatmap(
+  cor_TA_scaled,
+  col = colorRampPalette(
+    c("#0571B0","#92C5DE","#F7F7F7","#F4A582","#CA0020")
+  )(100),
+  row_order = c(
+    "Leaf_FoldEnrichment",
+    "Root_FoldEnrichment",
+    "Pollen_FoldEnrichment",
+    "Endosperm_FoldEnrichment"
+  ),
+  column_order = TissueOrders
+)
+
+##Figure 4B-E Examples and counter examples of the expression Mu correlation
+
+groups <- sub(" Rep.*", "", colnames(Genes)) #pool replicates
+groups <- as.character(groups)
+Genes_pooled <- do.call(
+  cbind,
+  lapply(split(seq_along(groups), groups), function(idx) {
+    rowMeans(Genes[, idx, drop = FALSE])
+  })
+)
+colnames(Genes_pooled) <- names(split(seq_along(groups), groups))
+Genes_pooled=Genes_pooled[,c(1:4, 7, 6,11, 9,10,5,8,12)]
+##Figure 4B endosperm specifically expressed endosperm hotspot
+makeBrowser2(HSid = "chr2_hs3590",width = 4000, show_heatmap = F)
+vals <- as.vector(as.numeric(Genes_pooled["Zm00001eb104490",]))
+par(mfrow=c(1,1))
+barplot(
+  vals,
+  names.arg = colnames(Genes_pooled),
+  las = 2,
+  cex.names = 0.5,
+  col = c(rep("#67536cff",4),"#a05a2cff",rep('#73b47cec',2),rep('#ffd42aff',3),rep("darkgreen",2)),
+  ylab = "FPKM"
+)
+##figure 4C, broadly expressed endo hotspot
+makeBrowser2(HSid = "chr3_hs3784",width = 4000, show_heatmap = F)
+vals <- as.vector(as.numeric(Genes_pooled["Zm00001eb157350",]))
+par(mfrow=c(1,1))
+barplot(
+  vals,
+  names.arg = colnames(Genes_pooled),
+  las = 2,
+  cex.names = 0.5,
+  col = c(rep("#67536cff",4),"#a05a2cff",rep('#73b47cec',2),rep('#ffd42aff',3),rep("darkgreen",2)),
+  ylab = "FPKM"
+)
+
+##Figure 4D Endosperm specific hotspot, expressed outside of endosperm
+makeBrowser2(HSid = "chr3_hs2442",width = 8000, show_heatmap = F)
+vals <- as.vector(as.numeric(Genes_pooled["Zm00001eb144960",]))
+par(mfrow=c(1,1))
+barplot(
+  vals,
+  names.arg = colnames(Genes_pooled),
+  las = 2,
+  cex.names = 0.5,
+  col = c(rep("#67536cff",4),"#a05a2cff",rep('#73b47cec',2),rep('#ffd42aff',3),rep("darkgreen",2)),
+  ylab = "FPKM"
+)
+##Figure 4E broad hotspot, strong leaf expression
+makeBrowser2(HSid = "chr6_hs1994",width = 4000, show_heatmap = F)
+vals <- as.vector(as.numeric(Genes_pooled["Zm00001eb286140",]))
+par(mfrow=c(1,1))
+barplot(
+  vals,
+  names.arg = colnames(Genes_pooled),
+  las = 2,
+  cex.names = 0.5,
+  col = c(rep("#67536cff",4),"#a05a2cff",rep('#73b47cec',2),rep('#ffd42aff',3),rep("darkgreen",2)),
+  ylab = "FPKM"
+)
+##Figure S5A-D Heatmap of Expression for strong tissue-associated hotspots
+FE <- HotSpots[,c(
+  "Endosperm_FoldEnrichment",
+  "Leaf_FoldEnrichment",
+  "Pollen_FoldEnrichment",
+  "Root_FoldEnrichment"
+)]
+
+geneID <- HotSpots$GeneIDs
+
+
+fourfold <- apply(FE,1,function(x) {
+  x <- sort(x,decreasing=TRUE,na.last=NA)
+  length(x) >= 2 && x[1]/x[2] >= 4
+})
+
+winner <- apply(FE,1,function(x) {
+  if(all(is.na(x))) NA else names(which.max(x))
+})
+
+genic <- HotSpots$Gene_assignment == "genic"
+FDRsig <- !is.na(HotSpots$FDRts) & HotSpots$FDRts <= 0.01
+
+Endosperm_4fold <- data.frame(FE,GeneID=geneID,row.names=rownames(HotSpots))
+Endosperm_4fold <- Endosperm_4fold[genic & fourfold & winner=="Endosperm_FoldEnrichment" & FDRsig,,drop=FALSE]
+
+Leaf_4fold <- data.frame(FE,GeneID=geneID,row.names=rownames(HotSpots))
+Leaf_4fold <- Leaf_4fold[genic & fourfold & winner=="Leaf_FoldEnrichment" & FDRsig,,drop=FALSE]
+
+Pollen_4fold <- data.frame(FE,GeneID=geneID,row.names=rownames(HotSpots))
+Pollen_4fold <- Pollen_4fold[genic & fourfold & winner=="Pollen_FoldEnrichment" & FDRsig,,drop=FALSE]
+
+Root_4fold <- data.frame(FE,GeneID=geneID,row.names=rownames(HotSpots))
+Root_4fold <- Root_4fold[genic & fourfold & winner=="Root_FoldEnrichment" & FDRsig,,drop=FALSE]
+
+####Figure S5A
+EndoHScats <- CategorizeExp2(Endosperm_4fold)
+
+Endosperm_4fold$Heatmap.grouping <- EndoHScats$Agreement
+
+InternalHS <-
+  HotSpots[rownames(Endosperm_4fold), "Gene_assignment"] == "genic" &
+  HotSpots[rownames(Endosperm_4fold), "TSS_distance"] > 500 
+
+Endosperm_4fold$Heatmap.grouping[InternalHS] <- "Internal_Hotspot"
+
+EndoHM <- draw(HS_Exp_heatmap2(Endosperm_4fold))
+
+##Figure S5B
+LeafHScats <- CategorizeExp2(Leaf_4fold,tissuematch =grepl("SAM|Shoot tip|Pooled Leaves|Topmost leaf",colnames(Genes_pooled)))
+
+Leaf_4fold$Heatmap.grouping <- LeafHScats$Agreement
+
+InternalHS <-
+  HotSpots[rownames(Leaf_4fold), "Gene_assignment"] == "genic" &
+  HotSpots[rownames(Leaf_4fold), "TSS_distance"] > 500 
+
+Leaf_4fold$Heatmap.grouping[InternalHS] <- "Internal_Hotspot"
+
+LeafHM <- draw(HS_Exp_heatmap2(Leaf_4fold))
+
+##Figure S5C
+PollenHScats <- CategorizeExp2(Pollen_4fold, tissuematch = grepl("tassel|Anthers",colnames(Genes_pooled)))
+
+Pollen_4fold$Heatmap.grouping <- PollenHScats$Agreement
+
+InternalHS <-
+  HotSpots[rownames(Pollen_4fold), "Gene_assignment"] == "genic" &
+  HotSpots[rownames(Pollen_4fold), "TSS_distance"] > 500 
+
+Pollen_4fold$Heatmap.grouping[InternalHS] <- "Internal_Hotspot"
+
+PollenHM <- draw(HS_Exp_heatmap2(Pollen_4fold))
+
+##Figure S5D
+RootHScats <- CategorizeExp2(Root_4fold, tissuematch=grepl("root",colnames(Genes_pooled)))
+
+Root_4fold$Heatmap.grouping <- RootHScats$Agreement
+
+InternalHS <-
+  HotSpots[rownames(Root_4fold), "Gene_assignment"] == "genic" &
+  HotSpots[rownames(Root_4fold), "TSS_distance"] > 500 
+
+Root_4fold$Heatmap.grouping[InternalHS] <- "Internal_Hotspot"
+
+RootHM <- draw(HS_Exp_heatmap2(Root_4fold))
+
+
+###################
+#                 #
+#   Section 5     #
+#                 #
+###################
+###Figure 5A and B Expression and ATAC scatter plots
+PlotInfo <- makeFig5PlotInfo(HotSpots) ###Function found in R-functions master script
+
+svg("Figure5B.svg",
+    width = 6,
+    height = 6)
+
+par(
+  pty = "s",
+  mar = c(5.5, 5.2, 3, 1),
+  mgp = c(2.8, 1, 0)
+)
+
+PlotFig5ExpressionScatter() ###Function found in R-functions master script
+
+#hotspots from earlier to show in the scatterplot:
+highlight_sub=c("chr2_hs3590","chr3_hs3784","chr3_hs2442","chr2_hs1717","chr6_hs2023","chr6_hs3008","chr6_hs1994","chr6_hs2594","chr9_hs2587","chr4_hs330","chr4_hs2702")
+
+selected <- HotSpots[highlight_sub, , drop = FALSE]
+
+labels <- as.character(selected$GeneNames)
+
+missing <- is.na(labels) | labels == "" | labels == "NA"
+
+labels[missing] <- as.character(selected$GeneIDs[missing])
+
+points(
+  log10(selected$Expr_Leaf + 1),
+  log10(selected$Expr_Endosperm + 1),
+  pch = 8,
+  col = "black",
+  cex = 1
+)
+
+text(
+  log10(selected$Expr_Leaf + 1),
+  log10(selected$Expr_Endosperm + 1),
+  labels = labels,
+  pos = 4,
+  cex = 1
+)
+PlotFig5ATACScatter() ###Function found in R-functions master script
+points(
+  log10(selected$Leaf_ATAC_Score + 1),
+  log10(selected$Endosperm_ATAC_Score + 1),
+  pch = 8,
+  bg = "white",
+  col = "black",
+  cex = 1
+)
+text(
+  log10(selected$Leaf_ATAC_Score + 1),
+  log10(selected$Endosperm_ATAC_Score + 1),
+  labels = labels,
+  pos = 4,
+  cex = 1
+)
+##Figure 5C Expression and ATAC discordant example
+#Zm00001eb286490
+##Figure 5D: Mu goes well into the gene beyond the ATAC peak
+#Zm00001eb299910 broadly targeted hotspot, lots of insertions, density well into the gene
+
+###Supplemental Figure S6 Expression and ATAC State Heatmap for endo-associated, consistent, and leaf-associated hotspots
+ht <-
+  PlotFigS7StateHeatmap("Endosperm") +
+  PlotFigS7StateHeatmap("Consistent") +
+  PlotFigS7StateHeatmap("Leaf") ##Function can be found in R-functions master script
+
+svg("FigureS6.svg")
+draw(
+  ht,
+  column_title = "Accessibility",
+  heatmap_legend_side = "right"
+)
+dev.off()
+
+
+###Supplemental Figure S7: ATAC and Expression Discordant Endosperm Hotspot
+#Zm00001eb286490 (WRKY83)  Good endo example, lacks K36me3, k4me1 , has K27me3
+CG=import("~/Downloads/CG_wrky83.wig")
+CHG=import("~/Downloads/CHG_wrky83.wig")
+CHH=import("~/Downloads/CHH_wrky83.wig")
+library(GenomicRanges)
+
+# Region
+region_start = 152579000
+region_end   = 152584000
+chr = "chr6"
+
+# Convert signed scores to methylation fractions
+CG$score  = abs(CG$score)
+CHG$score = abs(CHG$score)
+CHH$score = abs(CHH$score)
+
+# Combine all methylation contexts
+meth = c(CG, CHG, CHH)
+
+# Keep only the desired region
+meth = meth[
+  seqnames(meth) == chr &
+    start(meth) >= region_start &
+    start(meth) < region_end
+]
+
+# Make 10-bp bins
+bins = GRanges(
+  seqnames = chr,
+  ranges = IRanges(
+    start = seq(
+      region_start,
+      region_end - 25,
+      by = 25
+    ),
+    width = 25
+  )
+)
+
+# Find cytosines within each bin
+hits = findOverlaps(meth, bins)
+
+# Mean methylation fraction per bin
+bin_meth = tapply(
+  meth$score[queryHits(hits)],
+  subjectHits(hits),
+  mean
+)
+
+# Add methylation percentage to bins
+bins$methylation = NA_real_
+
+bins$methylation[
+  as.integer(names(bin_meth))
+] = bin_meth * 100
+
+# Keep bins containing at least one measured cytosine
+Meth25bp = bins[
+  !is.na(bins$methylation)
+]
+makeBrowser3("chr6_hs2023", width = 5000, methylation = Meth25bp)
+
+#Zm00001eb296230 (3-ketoacyl-coA synthase 16) good endo exmaple, lacks K36 and k4me1
+makeBrowser3("chr6_hs3008")
+#Zm00001eb025540 #lacks K36 me3
+makeBrowser3("chr1_hs2488") #bad ATAC
+#Zm00001eb236640 #Lacks K36me3 and K4me1
+makeBrowser3("chr5_hs2514") #bad ATAC
+#Zm00001eb086840 #has all marks, lower K36. It is also not the best from an expression atac perspective (more expressed and accessible in endo)
+#Zm00001eb193790 has all marks, It is also not the best from an expression atac perspective (more expressed and accessible in endo)
+#Zm00001eb030110  Good Leaf example
+makeBrowser3("chr1_hs2949") #maybe not a good leaf example. ATAC adds up here but expression doesnt. 
+#Zm00001eb136860 broad hotspot, with consistent histone modifications of an expressed gene
+makeBrowser3("chr7_hs135")
+
+
+###
+#H3K36me3 ScatterPlot
+PlotH3K36me3Scatter()
+highlight=c("chr2_hs3590","chr3_hs3784","chr3_hs2442","chr6_hs1994","chr6_hs798","chr2_hs1717","chr6_hs2023","chr7_hs135","chr6_hs3008",'chr7_hs1971')
+points(
+  log10(HotSpots[highlight, "Leaf_H3K36me3_Score"] + 1),
+  log10(HotSpots[highlight, "Endosperm_H3K36me3_Score"] + 1),
+  pch = 8,
+  bg = "white",
+  col = "black",
+  cex = 1
+)
+
+text(
+  log10(HotSpots[highlight, "Leaf_H3K36me3_Score"] + 1),
+  log10(HotSpots[highlight, "Endosperm_H3K36me3_Score"] + 1),
+  labels = HotSpots[highlight,"GeneNames"],
+  pos = 4,
+  cex = 1
+)
+###FIGURE5D############################################################
+## TSS-TTS NORMALIZED METAGENE PROFILE
+##
+## 4 kb upstream
+## 50 normalized gene-body bins
+## 4 kb downstreams
+##
+## Leaf ATAC
+## Endosperm ATAC
+## Mu insertions
+############################################################
+
+library(GenomicRanges)
+library(IRanges)
+
+
+############################################################
+## PARAMETERS
+############################################################
+
+flank <- 4000
+
+## Resolution of upstream/downstream regions
+flank_bin <- 100
+
+## Number of bins used to normalize the gene body
+## 50 is plenty of resolution and is substantially faster
+## than 100 bins
+body_bins <- 50
+
+main_chr <- paste0("chr", 1:10)
+
+
+############################################################
+## GET GENES
+############################################################
+
+Genes <- B73Genome[
+  B73Genome$type == "gene" &
+    as.character(seqnames(B73Genome)) %in% main_chr &
+    as.character(strand(B73Genome)) %in% c("+", "-")
+]
+
+## Remove extremely short genes
+Genes <- Genes[
+  width(Genes) >= body_bins
+]
+
+
+############################################################
+## KEEP ONLY GENES WITH ENOUGH FLANKING SEQUENCE
+##
+## These are the exact same genes that will be used for
+## both ATAC and Mu.
+############################################################
+
+valid_genes <- (
+  start(Genes) - flank >= 1 &
+    end(Genes) + flank <=
+    seqlengths(B73Genome)[
+      match(
+        as.character(seqnames(Genes)),
+        seqnames(B73Genome)
+      )
+    ]
+)
+
+## If seqlengths are not populated in B73Genome,
+## use the ATAC chromosome lengths instead.
+if(all(is.na(seqlengths(Genes)))) {
+  
+  valid_genes <- mapply(
+    function(chr, s, e) {
+      
+      chr %in% names(covL) &&
+        s - flank >= 1 &&
+        e + flank <= length(covL[[chr]])
+      
+    },
+    as.character(seqnames(Genes)),
+    start(Genes),
+    end(Genes)
+  )
+}
+
+Genes <- Genes[valid_genes]
+
+
+############################################################
+## CHECK NUMBER OF GENES
+############################################################
+
+cat(
+  "Genes used:",
+  length(Genes),
+  "\n"
+)
+
+
+############################################################
+## FAST ATAC METAGENE FUNCTION
+############################################################
+
+get_ATAC_metagene_fast <- function(
+    Genes,
+    cov,
+    flank = 4000,
+    flank_bin = 100,
+    body_bins = 50
+) {
+  
+  n_flank <- flank / flank_bin
+  
+  n_total <- (
+    2 * n_flank +
+      body_bins
+  )
+  
+  sums <- numeric(n_total)
+  
+  n_genes_total <- 0
+  
+  
+  ##########################################################
+  ## PROCESS CHROMOSOMES
+  ##########################################################
+  
+  for(chr in main_chr) {
+    
+    if(!chr %in% names(cov))
+      next
+    
+    idx <- which(
+      as.character(seqnames(Genes)) == chr
+    )
+    
+    if(length(idx) == 0)
+      next
+    
+    g <- Genes[idx]
+    
+    strand_g <- as.character(
+      strand(g)
+    )
+    
+    atac <- cov[[chr]]
+    
+    ng <- length(g)
+    
+    gene_start <- start(g)
+    gene_end <- end(g)
+    
+    
+    ########################################################
+    ## PROCESS PLUS AND MINUS STRANDS
+    ########################################################
+    
+    for(s in c("+", "-")) {
+      
+      keep <- strand_g == s
+      
+      if(!any(keep))
+        next
+      
+      gs <- gene_start[keep]
+      ge <- gene_end[keep]
+      
+      ngs <- length(gs)
+      
+      
+      ######################################################
+      ## UPSTREAM
+      ######################################################
+      
+      ##
+      ## Build all upstream windows at once.
+      ##
+      
+      if(s == "+") {
+        
+        up_start <- outer(
+          gs,
+          seq(
+            -flank,
+            -flank_bin,
+            by = flank_bin
+          ),
+          "+"
+        )
+        
+      } else {
+        
+        up_start <- outer(
+          ge,
+          seq(
+            -flank,
+            -flank_bin,
+            by = flank_bin
+          ),
+          "+"
+        )
+        
+        ## For minus strand, reverse biological direction
+        up_start <- ge +
+          outer(
+            rep(1, ngs),
+            seq(
+              -flank,
+              -flank_bin,
+              by = flank_bin
+            ),
+            "+"
+          )
+      }
+      
+      up_end <- up_start +
+        flank_bin -
+        1
+      
+      
+      ## Convert to vectors
+      up_values <- viewMeans(
+        Views(
+          atac,
+          start = as.vector(up_start),
+          end = as.vector(up_end)
+        )
+      )
+      
+      up_values <- matrix(
+        up_values,
+        nrow = ngs,
+        ncol = n_flank
+      )
+      
+      
+      ######################################################
+      ## GENE BODY
+      ######################################################
+      
+      ## Fractional positions along each gene
+      
+      f1 <- (
+        0:(body_bins - 1)
+      ) / body_bins
+      
+      f2 <- (
+        1:body_bins
+      ) / body_bins
+      
+      
+      if(s == "+") {
+        
+        body_start <- outer(
+          gs,
+          f1,
+          function(x, f)
+            floor(
+              x +
+                (ge - x) * f
+            )
+        )
+        
+        body_end <- outer(
+          gs,
+          f2,
+          function(x, f)
+            floor(
+              x +
+                (ge - x) * f
+            ) - 1
+        )
+        
+      } else {
+        
+        ## Biological TSS -> TTS orientation
+        
+        body_start <- outer(
+          ge,
+          f2,
+          function(x, f)
+            floor(
+              x -
+                (x - gs) * f
+            ) + 1
+        )
+        
+        body_end <- outer(
+          ge,
+          f1,
+          function(x, f)
+            floor(
+              x -
+                (x - gs) * f
+            )
+        )
+      }
+      
+      
+      ## Prevent zero-width intervals
+      body_end <- pmax(
+        body_end,
+        body_start
+      )
+      
+      
+      body_values <- viewMeans(
+        Views(
+          atac,
+          start = as.vector(body_start),
+          end = as.vector(body_end)
+        )
+      )
+      
+      body_values <- matrix(
+        body_values,
+        nrow = ngs,
+        ncol = body_bins
+      )
+      
+      
+      ######################################################
+      ## DOWNSTREAM
+      ######################################################
+      
+      if(s == "+") {
+        
+        down_start <- outer(
+          ge,
+          seq(
+            1,
+            flank - flank_bin + 1,
+            by = flank_bin
+          ),
+          "+"
+        )
+        
+      } else {
+        
+        down_start <- outer(
+          gs,
+          seq(
+            1,
+            flank - flank_bin + 1,
+            by = flank_bin
+          ),
+          "-"
+        )
+      }
+      
+      if(s == "+") {
+        
+        down_start <- down_start
+        
+      } else {
+        
+        ## Convert to genomic coordinates
+        down_start <- gs -
+          outer(
+            rep(1, ngs),
+            seq(
+              flank_bin,
+              flank,
+              by = flank_bin
+            ),
+            "+"
+          ) +
+          1
+      }
+      
+      down_end <- down_start +
+        flank_bin -
+        1
+      
+      
+      down_values <- viewMeans(
+        Views(
+          atac,
+          start = as.vector(down_start),
+          end = as.vector(down_end)
+        )
+      )
+      
+      down_values <- matrix(
+        down_values,
+        nrow = ngs,
+        ncol = n_flank
+      )
+      
+      
+      ######################################################
+      ## REVERSE MINUS-STRAND FLANKS
+      ######################################################
+      
+      if(s == "-") {
+        
+        up_values <- up_values[
+          ,
+          n_flank:1,
+          drop = FALSE
+        ]
+        
+        down_values <- down_values[
+          ,
+          n_flank:1,
+          drop = FALSE
+        ]
+      }
+      
+      
+      ######################################################
+      ## COMBINE
+      ######################################################
+      
+      profile <- cbind(
+        up_values,
+        body_values,
+        down_values
+      )
+      
+      
+      ######################################################
+      ## AVERAGE ACROSS GENES
+      ######################################################
+      
+      sums <- sums +
+        colSums(
+          profile
+        )
+      
+      n_genes_total <-
+        n_genes_total +
+        ngs
+    }
+  }
+  
+  
+  ##########################################################
+  ## RETURN MEAN PROFILE
+  ##########################################################
+  
+  sums / n_genes_total
+}
+
+
+############################################################
+## LEAF ATAC
+############################################################
+
+cat(
+  "Calculating Leaf ATAC...\n"
+)
+
+Leaf_metagene <- get_ATAC_metagene_fast(
+  Genes = Genes,
+  cov = covL,
+  flank = flank,
+  flank_bin = flank_bin,
+  body_bins = body_bins
+)
+
+
+############################################################
+## ENDOSPERM ATAC
+############################################################
+
+cat(
+  "Calculating Endosperm ATAC...\n"
+)
+
+Endo_metagene <- get_ATAC_metagene_fast(
+  Genes = Genes,
+  cov = covE,
+  flank = flank,
+  flank_bin = flank_bin,
+  body_bins = body_bins
+)
+
+
+############################################################
+## MU INSERTION DATA
+############################################################
+
+MuGR <- GRanges(
+  seqnames = Locs$chr,
+  ranges = IRanges(
+    start = Locs$position,
+    end = Locs$position
+  )
+)
+
+MuGR <- MuGR[
+  as.character(seqnames(MuGR)) %in% main_chr
+]
+
+
+############################################################
+## ASSIGN MU INSERTIONS TO GENES
+############################################################
+
+cat(
+  "Assigning Mu insertions to genes...\n"
+)
+
+hits <- findOverlaps(
+  MuGR,
+  Genes,
+  ignore.strand = TRUE
+)
+
+Mu_gene <- MuGR[
+  queryHits(hits)
+]
+
+gene_idx <- subjectHits(hits)
+
+
+############################################################
+## GENE INFORMATION FOR EACH INSERTION
+############################################################
+
+gene_start <- start(
+  Genes[gene_idx]
+)
+
+gene_end <- end(
+  Genes[gene_idx]
+)
+
+gene_strand <- as.character(
+  strand(
+    Genes[gene_idx]
+  )
+)
+
+Mu_pos <- start(
+  Mu_gene
+)
+
+
+############################################################
+## RELATIVE DISTANCE FROM TSS
+############################################################
+
+relative_TSS <- ifelse(
+  gene_strand == "+",
+  Mu_pos - gene_start,
+  gene_end - Mu_pos
+)
+
+
+############################################################
+## RELATIVE DISTANCE FROM TTS
+############################################################
+
+relative_TTS <- ifelse(
+  gene_strand == "+",
+  Mu_pos - gene_end,
+  gene_start - Mu_pos
+)
+
+
+############################################################
+## GENE-BODY POSITION
+############################################################
+
+gene_length <- gene_end -
+  gene_start
+
+body_fraction <- ifelse(
+  gene_strand == "+",
+  (Mu_pos - gene_start) /
+    gene_length,
+  (gene_end - Mu_pos) /
+    gene_length
+)
+
+
+############################################################
+## MU FOLD ENRICHMENT PROFILE
+############################################################
+
+n_flank <- flank / flank_bin
+
+n_bins <- (
+  2 * n_flank +
+    body_bins
+)
+
+## Genome-wide Mu insertion density
+Mu_density <- length(MuGR) /
+  EffectiveGenomeSize
+
+
+## Store one FE profile per gene
+Mu_profiles <- matrix(
+  NA_real_,
+  nrow = length(Genes),
+  ncol = n_bins
+)
+
+
+############################################################
+## CALCULATE FE FOR EACH GENE
+############################################################
+
+for(i in seq_along(Genes)) {
+  
+  s <- as.character(
+    strand(Genes[i])
+  )
+  
+  if(s == "*" || is.na(s))
+    next
+  
+  gs <- start(Genes[i])
+  ge <- end(Genes[i])
+  
+  ## Mu insertions assigned to this gene
+  mu_i <- Mu_pos[
+    gene_idx == i
+  ]
+  
+  
+  ##########################################################
+  ## UPSTREAM
+  ##########################################################
+  
+  relative_TSS_i <- if(s == "+") {
+    mu_i - gs
+  } else {
+    ge - mu_i
+  }
+  
+  up_idx <- (
+    relative_TSS_i >= -flank &
+      relative_TSS_i < 0
+  )
+  
+  up_counts <- integer(n_flank)
+  
+  if(any(up_idx)) {
+    
+    up_bins <- floor(
+      (
+        relative_TSS_i[up_idx] +
+          flank
+      ) / flank_bin
+    ) + 1
+    
+    up_bins <- pmin(
+      pmax(
+        up_bins,
+        1
+      ),
+      n_flank
+    )
+    
+    up_counts <- tabulate(
+      up_bins,
+      nbins = n_flank
+    )
+  }
+  
+  ## Expected insertions in each 100-bp flank bin
+  up_expected <- Mu_density *
+    flank_bin
+  
+  up_FE <- up_counts /
+    up_expected
+  
+  
+  ##########################################################
+  ## GENE BODY
+  ##########################################################
+  
+  gene_length <- ge - gs
+  
+  body_fraction <- if(s == "+") {
+    (mu_i - gs) /
+      gene_length
+  } else {
+    (ge - mu_i) /
+      gene_length
+  }
+  
+  body_idx <- (
+    body_fraction >= 0 &
+      body_fraction <= 1
+  )
+  
+  body_counts <- integer(body_bins)
+  
+  if(any(body_idx)) {
+    
+    body_bins_idx <- pmin(
+      floor(
+        body_fraction[body_idx] *
+          body_bins
+      ) + 1,
+      body_bins
+    )
+    
+    body_counts <- tabulate(
+      body_bins_idx,
+      nbins = body_bins
+    )
+  }
+  
+  
+  ## Genomic intervals represented by each
+  ## normalized gene-body bin
+  f1 <- (
+    0:(body_bins - 1)
+  ) / body_bins
+  
+  f2 <- (
+    1:body_bins
+  ) / body_bins
+  
+  
+  if(s == "+") {
+    
+    body_start <- floor(
+      gs +
+        (ge - gs) * f1
+    )
+    
+    body_end <- floor(
+      gs +
+        (ge - gs) * f2
+    ) - 1
+    
+  } else {
+    
+    body_start <- floor(
+      ge -
+        (ge - gs) * f2
+    ) + 1
+    
+    body_end <- floor(
+      ge -
+        (ge - gs) * f1
+    )
+  }
+  
+  ## Prevent zero-width intervals
+  body_end <- pmax(
+    body_end,
+    body_start
+  )
+  
+  body_width <- (
+    body_end -
+      body_start +
+      1
+  )
+  
+  ## Expected Mu insertions for each body bin
+  body_expected <- Mu_density *
+    body_width
+  
+  body_FE <- body_counts /
+    body_expected
+  
+  
+  ##########################################################
+  ## DOWNSTREAM
+  ##########################################################
+  
+  relative_TTS_i <- if(s == "+") {
+    mu_i - ge
+  } else {
+    gs - mu_i
+  }
+  
+  down_idx <- (
+    relative_TTS_i >= 0 &
+      relative_TTS_i < flank
+  )
+  
+  down_counts <- integer(n_flank)
+  
+  if(any(down_idx)) {
+    
+    down_bins <- floor(
+      relative_TTS_i[down_idx] /
+        flank_bin
+    ) + 1
+    
+    down_bins <- pmin(
+      pmax(
+        down_bins,
+        1
+      ),
+      n_flank
+    )
+    
+    down_counts <- tabulate(
+      down_bins,
+      nbins = n_flank
+    )
+  }
+  
+  ## Expected insertions in each downstream bin
+  down_expected <- Mu_density *
+    flank_bin
+  
+  down_FE <- down_counts /
+    down_expected
+  
+  
+  ##########################################################
+  ## COMBINE
+  ##########################################################
+  
+  Mu_profiles[i, ] <- c(
+    up_FE,
+    body_FE,
+    down_FE
+  )
+}
+
+
+############################################################
+## AVERAGE FE ACROSS GENES
+############################################################
+
+Mu_profile <- colMeans(
+  Mu_profiles,
+  na.rm = TRUE
+)
+
+############################################################
+## X AXIS
+############################################################
+
+x_up <- seq(
+  -flank + flank_bin / 2,
+  -flank_bin / 2,
+  by = flank_bin
+)
+
+x_body <- seq(
+  0,
+  flank,
+  length.out = body_bins
+)
+
+x_down <- seq(
+  flank + flank_bin / 2,
+  2 * flank - flank_bin / 2,
+  by = flank_bin
+)
+
+x <- c(
+  x_up,
+  x_body,
+  x_down
+)
+
+
+############################################################
+## COMMON Y AXIS
+############################################################
+
+ymax <- ceiling(
+  max(
+    c(
+      Leaf_metagene,
+      Endo_metagene,
+      Mu_profile
+    ),
+    na.rm = TRUE
+  )
+)
+
+
+############################################################
+## PLOT
+############################################################
+
+plot(
+  x,
+  Leaf_metagene,
+  type = "l",
+  lwd = 2,
+  col = "#73b47c",
+  xlab = "Position relative to TSS / normalized gene body",
+  ylab = "Fold enrichment",
+  main = "ATAC accessibility and Mu insertions across genes",
+  xaxt = "n",
+  ylim = c(0, ymax)
+)
+
+
+############################################################
+## ENDOSPERM ATAC
+############################################################
+
+lines(
+  x,
+  Endo_metagene,
+  lwd = 2,
+  col = "#67536c"
+)
+
+
+############################################################
+## MU
+############################################################
+
+lines(
+  x,
+  Mu_profile,
+  lwd = 2,
+  col = "black"
+)
+
+
+############################################################
+## GENOME-WIDE AVERAGE
+############################################################
+
+abline(
+  h = 1,
+  col = "gray50",
+  lty = 2,
+  lwd = 1
+)
+
+
+############################################################
+## X AXIS
+############################################################
+
+axis(
+  side = 1,
+  at = c(
+    -4000,
+    0,
+    2000,
+    4000,
+    6000,
+    8000
+  ),
+  labels = c(
+    "-4 kb",
+    "TSS",
+    "50% gene",
+    "TTS",
+    "+2 kb",
+    "+4 kb"
+  )
+)
+
+
+############################################################
+## TSS / TTS LINES
+############################################################
+
+abline(
+  v = 0,
+  col = "black",
+  lwd = 1.5
+)
+
+abline(
+  v = 4000,
+  col = "black",
+  lwd = 1.5,
+  lty = 2
+)
+
+
+############################################################
+## LEGEND
+############################################################
+
+legend(
+  "topright",
+  legend = c(
+    "Leaf ATAC",
+    "Endosperm ATAC",
+    "Mu insertions"
+  ),
+  col = c(
+    "#73b47c",
+    "#67536c",
+    "black"
+  ),
+  lwd = 2,
+  bty = "n"
+)
+

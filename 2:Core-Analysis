@@ -1,0 +1,1318 @@
+#This file describes analysis beginning with "GSE279993_MuCounts_target_site_preference.csv" (generated as described in Scherer et al., 2025) to generate Locs.rda, and Supplemental Data S1, the R dataframe from which figures were generated. 
+
+#create constants
+EffectiveGenomeSize=2182075994 #calculated using genmap, this is the effective genome size for B73 V5
+
+##load in packages
+library(ComplexHeatmap)
+library(GenomicRanges)
+library(rtracklayer)
+library(GenomicFeatures)
+library(GenomeInfoDb)
+library(txdbmaker)
+library(circlize)
+library(viridis)
+
+MuCounts <- read.csv(
+  "GSE279993_MuCounts_target_site_preference.csv",
+  row.names = 1,
+  check.names = FALSE
+)
+
+MuCounts=poolTechReps_HS(MuCounts) # Modify poolTechReps to not expect a list, and just work from trimmed MuCounts
+
+#filter inherited insertions from MuCounts
+MuCountsCPM=sweep(MuCounts,2,colSums(MuCounts),"/")*10^6 #normalize by library depth to better identify the inherited insertions from the dataset
+plant=gsub("_.+","", colnames(MuCounts),ignore.case=F)
+samps = unique(plant[grepl('E', colnames(MuCounts))])
+FindShared = MuCountsCPM[,plant %in% samps]
+plant = plant[plant %in% samps]
+paternals=list()
+for (s in samps) {
+  X2 = FindShared[,plant == s] >= 1000
+  X2=as.data.frame(X2)
+  if (ncol(X2) == 2) {
+    paternals[[s]] = (rowMeans(X2) == 1)}
+  
+  if (ncol(X2)>2) {
+    paternals[[s]] = X2[,grepl('E', colnames(X2))] & (rowSums(X2[,!grepl('E', colnames(X2))]) >= 1) 
+    
+  }
+}
+AllInherited=gsub(".+c","c",names(which(unlist(paternals))>0)) #takes the list made from the above loop and identifies the positions of all inherited insertions across our dataset. 
+##
+MuCounts=MuCounts[rowSums(MuCounts[, grep("_MI$", colnames(MuCounts))]) < rowSums(MuCounts), ]
+##Make Locs object from MuCounts object
+Locs = t(matrix(unlist(strsplit(rownames(MuCounts), ':')), nrow = 2)) ##creat Locs, while requring a row to have a count outside of MI samples to be included
+Locs1=strsplit(Locs[,2],",")
+Locs1=lapply(Locs1, function(X){round(mean(as.numeric(X)))}) #taking the average of LB RB 
+Locs = data.frame(chr = Locs[,1], position = unlist(Locs1))
+Locs$bin = paste(Locs$chr, round(Locs$pos/2000), sep = ',')
+#save(Locs, file="Locs.rda")
+###
+
+#make HotSpots from Locs object, calculate size and remove hotspots smaller than 100 bp
+HotSpots = FindHotSpots(Locs[!rownames(MuCounts)%in%AllInherited,])  # Identify Mu hotspots using overall insertion locations
+HotSpots$size = apply(HotSpots[,2:3], 1, diff) + 1 #add size of hotspot column to dataframe
+HotSpots=HotSpots[HotSpots$size>=100,]
+
+#FDR correct the initial called hotspots
+#Nulls was generated using script "HSNulls_Array.R"
+score = function(xx) {
+  -ppois(xx[1] - 1, xx[2]*(nrow(Locs)/EffectiveGenomeSize), lower.tail=F, log.p=T)
+}
+HotSpots$Score = apply(HotSpots[,4:5], 1, score)
+load("HotSpotNULL_ALL.rda")
+all_nulls = lapply(all_nulls, function(X) {
+  X$size = abs(apply(X[, 2:3], 1, diff)) + 1
+  X
+}) #get hotspot sizes for null distributions
+all_nulls_scores = unlist(lapply(all_nulls, function(X){X$score=apply(X[,4:5], 1, score)})) #calculate "score" for each null hotspot using hotspot size and insertions detected in the hotspot
+
+# Order by decreasing score first
+HotSpots = HotSpots[order(-HotSpots$Score), ]
+# Recompute ranks after ordering
+FDRs = rank(-c(HotSpots$Score, all_nulls_scores), ties.method = 'max')[1:nrow(HotSpots)]
+FDRs2 = rank(-HotSpots$Score, ties.method = 'max')
+rawFDR = (FDRs - FDRs2) / FDRs2 / 1000 # Empirical FDR
+HotSpots$FDR = cummax(rawFDR)
+HotSpots = HotSpots[HotSpots$FDR <= 0.01, ]# Apply cutoff
+#save(HotSpots, file="HotSpots.rda") #this is a dataframe now containing FDR corrected hotspots >100 bp in size
+
+####Figure 3 stats and figure making, rewrote here for simplicity and truncation
+RunHotspotStats <- function(HScounts, lib.size, min_count = 10, lfc = 1) {
+  
+  counts <- HScounts[
+    rownames(HScounts) != "none",
+    !grepl("MI", colnames(HScounts)),
+    drop = FALSE
+  ]
+  
+  lib.size <- lib.size[colnames(counts)]
+  
+  tissue <- factor(
+    sub(".*_", "", colnames(counts)),
+    levels = c("E", "L", "P", "R")
+  )
+  
+  counts <- counts[
+    rowSums(counts) >= min_count,
+    ,
+    drop = FALSE
+  ]
+  
+  design <- model.matrix(~0 + tissue)
+  colnames(design) <- levels(tissue)
+  
+  y <- estimateDisp(
+    DGEList(counts, lib.size = lib.size),
+    design,
+    robust = TRUE
+  )
+  
+  fit <- glmQLFit(y, design, robust = TRUE)
+  
+  P <- sapply(
+    combn(levels(tissue), 2, simplify = FALSE),
+    function(p) {
+      glmTreat(
+        fit,
+        contrast = makeContrasts(
+          contrasts = paste0(p[1], "-", p[2]),
+          levels = design
+        ),
+        lfc = lfc
+      )$table$PValue
+    }
+  )
+  
+  p_comb <- apply(P, 1, function(p) {
+    min(sort(p) * length(p) / seq_along(p))
+  })
+  
+  tissue_totals <- tapply(lib.size, tissue, sum)
+  
+  est <- sweep(
+    exp(fit$coefficients),
+    2,
+    tissue_totals,
+    "*"
+  )
+  
+  res <- data.frame(
+    hotspot = rownames(counts),
+    p_unadjusted = p_comb,
+    FDR = p.adjust(p_comb, "BH"),
+    setNames(as.data.frame(est), colnames(est))
+  )
+  
+  rownames(res) <- rownames(counts)
+  
+  res
+}
+CalculateFE <- function(HScounts, total_insertions, HotSpots, EffectiveGenomeSize) {
+  
+  hs <- setdiff(rownames(HScounts), "none")
+  
+  counts <- HScounts[hs, , drop = FALSE]
+  
+  total_sites <- total_insertions[colnames(counts)]
+  
+  hs_size <- HotSpots[
+    match(hs, rownames(HotSpots)),
+    "size"
+  ]
+  
+  FE <- sweep(counts, 2, total_sites, "/")
+  
+  FE <- sweep(
+    FE,
+    1,
+    hs_size / EffectiveGenomeSize,
+    "/"
+  )
+  
+  FE
+}
+###get stats
+HScounts <- matrix2bincounts(MuCounts)
+### Remove hotspots overlapping inherited insertions
+InheritedLocs <- do.call(
+  rbind,
+  strsplit(AllInherited, "[:,]")
+)
+
+HotSpotsWithInherited <- apply(
+  HotSpots[, c("chr", "start", "end")],
+  1,
+  function(x) {
+    any(
+      InheritedLocs[, 1] == x["chr"] &
+        pmin(
+          as.numeric(InheritedLocs[, 2]),
+          as.numeric(InheritedLocs[, 3])
+        ) <= as.numeric(x["end"]) &
+        pmax(
+          as.numeric(InheritedLocs[, 2]),
+          as.numeric(InheritedLocs[, 3])
+        ) >= as.numeric(x["start"])
+    )
+  }
+)
+
+HScounts2 <- HScounts[
+  rownames(HScounts) == "none" |
+    !(rownames(HScounts) %in%
+        names(HotSpotsWithInherited)[HotSpotsWithInherited]),
+]
+
+### Total Mu insertions per sample in hotspots
+#run stats
+total_insertions <- colSums(
+  HScounts[-1, , drop = FALSE]
+)[colnames(counts)] #use only reads mapping to hotspots for stats
+
+res <- RunHotspotStats(
+  HScounts2,
+  total_insertions
+)
+
+cat(
+  "Full dataset - hotspots > 2-fold at FDR 0.01:",
+  sum(res$FDR <= 0.01),
+  "\n"
+)
+####converting model estimates to FE
+# Tissue-level total Mu insertions
+counts <- HScounts2[-1, !grepl("MI", colnames(HScounts2))]
+
+tissue <- factor(
+  sub(".*_", "", colnames(counts)),
+  levels = c("E", "L", "P", "R")
+)
+
+total_insertions <- colSums(
+  HScounts[-1, , drop = FALSE]
+)[colnames(counts)]
+
+tissue_totals <- tapply(total_insertions, tissue, sum)
+# Model-estimated fraction of Mu insertions in each hotspot
+FE_model <- sweep(
+  res[, c("E", "L", "P", "R")],
+  2,
+  tissue_totals,
+  "/"
+)
+
+# Convert to fold enrichment relative to genomic expectation
+FE_model <- sweep(
+  FE_model,
+  1,
+  HotSpots[rownames(FE_model), "size"] / EffectiveGenomeSize,
+  "/"
+)
+
+###Assign stats to HotSpots dataframe
+HotSpots$FDRts <- res[match(rownames(HotSpots), rownames(res)), "FDR"]
+
+### Assign model-based FE values to HotSpots
+
+FE_model_match <- FE_model[
+  match(rownames(HotSpots), rownames(FE_model)),
+  c(
+    "Endosperm_FoldEnrichment",
+    "Leaf_FoldEnrichment",
+    "Pollen_FoldEnrichment",
+    "Root_FoldEnrichment"
+  ),
+  drop = FALSE
+]
+
+HotSpots[, c(
+  "Endosperm_FoldEnrichment",
+  "Leaf_FoldEnrichment",
+  "Pollen_FoldEnrichment",
+  "Root_FoldEnrichment"
+)] <- FE_model_match
+
+###Adding Gene information to hotspots
+
+##make GRanges object to compare to B73 annotations in R
+HotSpotsRanges=IRanges(start=HotSpots$start,
+                       end = HotSpots$end,
+                       width = HotSpots$size, 
+                       names = rownames(HotSpots))
+
+HotSpotsGRanges=GRanges(seqnames = HotSpots$chr,
+                        ranges = HotSpotsRanges, 
+                        rep("*", length(HotSpots$chr)),
+                        EndospermFoldEnrichment=HotSpots$Endosperm_FoldEnrichment, 
+                        LeafFoldEnrichment=HotSpots$Leaf_FoldEnrichment, 
+                        PollenFoldEnrichment=HotSpots$Pollen_FoldEnrichment, 
+                        RootFoldEnrichment=HotSpots$Root_FoldEnrichment, 
+                        HotspotID=rownames(HotSpots))
+
+###get genes and coordinates to convert between hotspots and genes
+B73Genome=import("~/Desktop/Coding/Genomes/Zm-B73-REFERENCE-NAM-5.0_Zm00001eb.1.gff3.gz")
+B73Genes=B73Genome[B73Genome$type=="gene"]
+#make hits object, add gene IDs to hotspotsgranges object
+hits <- findOverlaps(HotSpotsGRanges, B73Genes, type="any")
+gene_list <- split(
+  B73Genes$ID[subjectHits(hits)],
+  queryHits(hits)
+)
+
+collapsed <- sapply(gene_list, paste, collapse = ",")
+HotSpotsGRanges$GeneIDs <- NA
+HotSpotsGRanges$GeneIDs[as.integer(names(collapsed))] <- collapsed
+##Add gene ids to HotSpots dataframe
+HotSpots$GeneIDs= sapply(HotSpotsGRanges$GeneIDs, paste, collapse = ",")
+
+#add gene names as well as GeneIDs to hotspots
+# Load MaizeGDB B73 v5 gene annotation
+fulldata <- read.delim(
+  "~/Downloads/Zm00001eb.1.fulldata.txt.gz",
+  header = FALSE,
+  sep = "\t"
+)
+
+# Create gene ID -> MaizeGDB gene name lookup
+gene_map <- fulldata$V12
+names(gene_map) <- fulldata$V2
+
+# Use gene ID when no MaizeGDB name is available
+gene_map[gene_map == "-"] <- names(gene_map)[gene_map == "-"]
+
+# Add gene names to hotspots
+HotSpots$GeneNames <- sapply(
+  strsplit(HotSpots$GeneIDs, ","),
+  function(g) {
+    names <- gene_map[g]
+    names <- names[names != g]
+    if(length(names) == 0) NA
+    else paste(names, collapse = ",")
+  }
+)
+
+Endobw=import.bw("/Users/justinscherer/Library/CloudStorage/OneDrive-UniversityofGeorgia/JustinScherer/Onedrive/HotSpotCallingAlgorithm/HotSpotDataFinal/BigWigs/EndoATAC_Merged.bw")
+Leafbw=import.bw("/Users/justinscherer/Library/CloudStorage/OneDrive-UniversityofGeorgia/JustinScherer/Onedrive/HotSpotCallingAlgorithm/HotSpotDataFinal/BigWigs/LeafATAC.bw")
+
+# Calculate mean per bp read density ("score" / bp) within each HS, per each tissue
+
+
+TotalE <- sum(Endobw$score * width(Endobw))
+ExpE = TotalE/EffectiveGenomeSize
+Endobw$score=Endobw$score/ExpE #normalize using fold enrichment
+
+TotalL <- sum(Leafbw$score * width(Leafbw))
+ExpL=TotalL/EffectiveGenomeSize
+Leafbw$score <- Leafbw$score/ExpL #normalize using fold enrichment
+
+# Convert each bigWig to RleList coverage weighted by score
+covE <- coverage(Endobw, weight = Endobw$score)
+covL <- coverage(Leafbw, weight=Leafbw$score)
+remove(Endobw, Leafbw)
+covL <- endoapply(covL, function(x) {
+  rv <- runValue(x)
+  rv[rv < 0 & abs(rv) < 1e-9] <- 0 #floating point error correction
+  Rle(rv, runLength(x))
+})
+
+covE <- endoapply(covE, function(x) {
+  rv <- runValue(x)
+  rv[rv < 0 & abs(rv) < 1e-9] <- 0 #floating point error correction
+  Rle(rv, runLength(x))
+})
+
+
+## Export the FE-normalized per-base tracks
+#export(covE, "EndoATAC_FE_9-28-26.bw", format = "bigWig")
+#export(covL, "LeafATAC_FE_9-28-26.bw", format = "bigWig")
+
+# Add to HotSpotsDF
+
+# Convert HotSpots dataframe to GRanges
+hotspots_gr <- GRanges(
+  seqnames = HotSpots$chr,
+  ranges = IRanges(start = HotSpots$start, end = HotSpots$end)
+)
+
+# Identify which rows are on the 10 main chromosomes vs scaffolds
+main_chrs <- paste0("chr", 1:10)
+on_main_chr <- as.character(seqnames(hotspots_gr)) %in% main_chrs
+
+# Subset to main chromosomes only
+hotspots_main <- hotspots_gr[on_main_chr]
+hotspots_main <- keepSeqlevels(
+  hotspots_main,
+  main_chrs,
+  pruning.mode = "coarse"
+)
+covE <- covE[main_chrs]
+covL <- covL[main_chrs]
+covE <- covE[seqlevels(hotspots_main)]
+covL <- covL[seqlevels(hotspots_main)]
+
+# Compute scores for main chromosome hotspots
+main_scores_E <- binnedAverage(
+  hotspots_main,
+  covE,
+  "Endosperm_ATAC_Score"
+)$Endosperm_ATAC_Score
+
+main_scores_L <- binnedAverage(
+  hotspots_main,
+  covL,
+  "Leaf_ATAC_Score"
+)$Leaf_ATAC_Score
+
+
+# Build a full-length vector with NA for scaffolds, filled in for main chrs
+HotSpots$Endosperm_ATAC_Score <- NA
+HotSpots$Endosperm_ATAC_Score[on_main_chr] <- main_scores_E
+HotSpots$Leaf_ATAC_Score <- NA
+HotSpots$Leaf_ATAC_Score[on_main_chr] <- main_scores_L
+remove(covE, covL)
+
+##This script is for normalizing H3k36me3 bigwigs using FE
+library(GenomicRanges)
+library(rtracklayer)
+library(GenomicFeatures)
+library(GenomeInfoDb)
+EffectiveGenomeSize = 2182075994
+EndoK36bw=import.bw("/Users/justinscherer/Library/CloudStorage/OneDrive-UniversityofGeorgia/JustinScherer/Onedrive/HotSpotCallingAlgorithm/HotSpotDataFinal/BigWigs/EndoH3K36me3.bw")
+LeafK36bw=import.bw("/Users/justinscherer/Library/CloudStorage/OneDrive-UniversityofGeorgia/JustinScherer/Onedrive/HotSpotCallingAlgorithm/HotSpotDataFinal/BigWigs/H3K36me3_Leaf.bw")
+
+# Calculate mean per bp read density ("score" / bp) within each HS, per each tissue
+
+
+TotalE <- sum(EndoK36bw$score * width(EndoK36bw))
+ExpE = TotalE/EffectiveGenomeSize
+EndoK36bw$score=EndoK36bw$score/ExpE #normalize using fold enrichment
+
+TotalL <- sum(LeafK36bw$score * width(LeafK36bw))
+ExpL=TotalL/EffectiveGenomeSize
+LeafK36bw$score <- LeafK36bw$score/ExpL #normalize using fold enrichment
+
+# Convert each bigWig to RleList coverage weighted by score
+covE_K36 <- coverage(EndoK36bw, weight = EndoK36bw$score)
+covL_K36 <- coverage(LeafK36bw, weight=LeafK36bw$score)
+
+covL_K36 <- endoapply(covL_K36, function(x) {
+  rv <- runValue(x)
+  rv[rv < 0 & abs(rv) < 1e-9] <- 0
+  Rle(rv, runLength(x))
+})
+
+covE_K36 <- endoapply(covE_K36, function(x) {
+  rv <- runValue(x)
+  rv[rv < 0 & abs(rv) < 1e-9] <- 0
+  Rle(rv, runLength(x))
+})
+
+# Add to HotSpotsDF
+
+# Convert HotSpots dataframe to GRanges
+hotspots_gr <- GRanges(
+  seqnames = HotSpots$chr,
+  ranges = IRanges(start = HotSpots$start, end = HotSpots$end)
+)
+
+# Identify which rows are on the 10 main chromosomes vs scaffolds
+main_chrs <- paste0("chr", 1:10)
+on_main_chr <- as.character(seqnames(hotspots_gr)) %in% main_chrs
+
+# Subset to main chromosomes only
+hotspots_main <- hotspots_gr[on_main_chr]
+hotspots_main <- keepSeqlevels(
+  hotspots_main,
+  main_chrs,
+  pruning.mode = "coarse"
+)
+covE_K36 <- covE_K36[main_chrs]
+covL_K36 <- covL_K36[main_chrs]
+covE_K36 <- covE_K36[seqlevels(hotspots_main)]
+covL_K36 <- covL_K36[seqlevels(hotspots_main)]
+
+# Compute scores for main chromosome hotspots
+main_scores_E <- binnedAverage(
+  hotspots_main,
+  covE_K36,
+  "Endosperm_H3K36me3_Score"
+)$Endosperm_H3K36me3_Score
+
+main_scores_L <- binnedAverage(
+  hotspots_main,
+  covL_K36,
+  "Leaf_H3K36me3_Score"
+)$Leaf_H3K36me3_Score
+
+export(
+  EndoK36bw,
+  "EndoH3K36me3_FE.bw",
+  format = "BigWig"
+)
+
+export(
+  LeafK36bw,
+  "LeafH3K36me3_FE.bw",
+  format = "BigWig"
+)
+# Build a full-length vector with NA for scaffolds, filled in for main chrs
+HotSpots$Endosperm_H3K36me3_Score <- NA
+HotSpots$Endosperm_H3K36me3_Score[on_main_chr] <- main_scores_E
+HotSpots$Leaf_H3K36me3_Score <- NA
+HotSpots$Leaf_H3K36me3_Score[on_main_chr] <- main_scores_L
+
+####Adding expression averages to each hotspot for endosperm, leaf, undifferentiated, male floral, and root
+#expression data
+load("Maize Tissue Atlas _ remappedV5-1.rda") ##loading packages and data set
+
+Genes=A ##subsetting tisue atlas
+Genes=Genes[,order(colnames(Genes))]
+Genes=Genes[,c(16:18,27:29,36:38,49:51,81:83,90:106,110:116,123:125)]
+gff=import("~/Desktop/Coding/Genomes/Zm-B73-REFERENCE-NAM-5.0_Zm00001eb.1.gff3.gz")
+# Get genes
+genes <- gff[gff$type == "gene"]
+gene_ids <- genes$ID
+
+# Extract exon features
+exons <- gff[gff$type == "exon"]
+
+# Convert transcript IDs to gene IDs
+tx_ids <- as.character(unlist(exons$Parent))
+gene_ids <- sub("_T[0-9]+$", "", tx_ids)
+
+# Add gene IDs as metadata
+mcols(exons)$gene_id <- gene_ids
+
+# Split exons by gene
+exons_by_gene <- split(exons, gene_ids)
+
+# Calculate non-overlapping exon length for each gene
+gene_lengths <- vapply(
+  exons_by_gene,
+  function(gr) sum(width(reduce(gr))),
+  numeric(1)
+)
+
+# Match gene lengths to expression matrix
+gene_lengths_matched <- gene_lengths[rownames(Genes)]
+
+FPKM <- sweep(Genes, 2, colSums(Genes), "/") * 1e9
+FPKM <- sweep(FPKM, 1, gene_lengths_matched, "/")
+Genes=FPKM 
+#save(Genes, file="Genes_FPKMNormalized_9-29-26.rda")
+# ---------------------------------------------------------------------------
+# Step 1: Define which columns belong to each tissue group
+# ---------------------------------------------------------------------------
+endo_cols    <- grep("Endosperm", colnames(Genes), value = TRUE)
+leaf_cols    <- grep("Leaves|Topmost leaf", colnames(Genes), value = TRUE)
+undiff_cols  <- grep("SAM|Shoot tip", colnames(Genes), value = TRUE)
+floral_cols    <- grep("tassel|Anthers", colnames(Genes), value = TRUE)
+root_cols    <- grep("root", colnames(Genes), value = TRUE, ignore.case = TRUE)
+
+single_gene <- !grepl(",", HotSpots$GeneIDs) & !is.na(HotSpots$GeneIDs)
+
+HotSpots$Expr_Endosperm  <- NA
+HotSpots$Expr_Leaf       <- NA
+HotSpots$Expr_Undiff     <- NA
+HotSpots$Expr_Floral       <- NA
+HotSpots$Expr_Root       <- NA
+
+for (i in which(single_gene)) {
+  gene <- HotSpots$GeneIDs[i]
+  
+  # Check gene exists in expression matrix
+  if (!gene %in% rownames(Genes)) next
+  
+  expr <- Genes[gene, ]
+  
+  HotSpots$Expr_Endosperm[i] <- mean(as.numeric(expr[endo_cols]),   na.rm = TRUE)
+  HotSpots$Expr_Leaf[i]      <- mean(as.numeric(expr[leaf_cols]),   na.rm = TRUE)
+  HotSpots$Expr_Undiff[i]    <- mean(as.numeric(expr[undiff_cols]), na.rm = TRUE)
+  HotSpots$Expr_Floral[i]      <- mean(as.numeric(expr[floral_cols]),   na.rm = TRUE)
+  HotSpots$Expr_Root[i]      <- mean(as.numeric(expr[root_cols]),   na.rm = TRUE)
+}
+
+
+
+
+############################################################
+## TranscriptDistances Pipeline
+##
+## Annotate each hotspot relative to transcript TSSs and TTSs
+############################################################
+
+
+
+############################################################
+## Load genome annotation
+############################################################
+
+HotSpotsGR <- GRanges(
+  seqnames = HotSpots$chr,
+  ranges = IRanges(
+    start = HotSpots$start,
+    end = HotSpots$end
+  )
+)
+B73Genome <- import(
+  "~/Desktop/Coding/Genomes/Zm-B73-REFERENCE-NAM-5.0_Zm00001eb.1.gff3.gz"
+)
+
+B73Genes <- B73Genome[B73Genome$type == "gene"]
+
+Transcripts <- B73Genome[
+  B73Genome$type %in% c("mRNA", "transcript")
+]
+
+############################################################
+## Build transcript annotation table
+############################################################
+
+TranscriptTable <- data.frame(
+  
+  Gene = sapply(
+    strsplit(as.character(Transcripts$Parent), ","),
+    `[`,
+    1
+  ),
+  
+  Transcript = as.character(Transcripts$ID),
+  
+  Chr = as.character(seqnames(Transcripts)),
+  
+  Strand = as.character(strand(Transcripts)),
+  
+  Start = start(Transcripts),
+  
+  End = end(Transcripts),
+  
+  stringsAsFactors = FALSE
+  
+)
+
+############################################################
+## Calculate transcript landmarks
+############################################################
+
+TranscriptTable$TSS <- ifelse(
+  TranscriptTable$Strand == "+",
+  TranscriptTable$Start,
+  TranscriptTable$End
+)
+
+TranscriptTable$TTS <- ifelse(
+  TranscriptTable$Strand == "+",
+  TranscriptTable$End,
+  TranscriptTable$Start
+)
+
+############################################################
+## Group transcripts sharing identical TSSs
+############################################################
+
+TSSgroups <- split(
+  seq_len(nrow(TranscriptTable)),
+  paste(
+    TranscriptTable$Gene,
+    TranscriptTable$Chr,
+    TranscriptTable$Strand,
+    TranscriptTable$TSS,
+    sep = "_"
+  )
+)
+
+TSSLandmarks <- do.call(
+  rbind,
+  lapply(TSSgroups, function(idx){
+    
+    data.frame(
+      
+      Gene = TranscriptTable$Gene[idx[1]],
+      
+      Chr = TranscriptTable$Chr[idx[1]],
+      
+      Strand = TranscriptTable$Strand[idx[1]],
+      
+      Coordinate = TranscriptTable$TSS[idx[1]],
+      
+      TranscriptIDs = paste(
+        TranscriptTable$Transcript[idx],
+        collapse = ","
+      ),
+      
+      stringsAsFactors = FALSE
+      
+    )
+    
+  })
+)
+
+rownames(TSSLandmarks) <- NULL
+
+############################################################
+## Group transcripts sharing identical TTSs
+############################################################
+
+TTSgroups <- split(
+  seq_len(nrow(TranscriptTable)),
+  paste(
+    TranscriptTable$Gene,
+    TranscriptTable$Chr,
+    TranscriptTable$Strand,
+    TranscriptTable$TTS,
+    sep = "_"
+  )
+)
+
+TTSLandmarks <- do.call(
+  rbind,
+  lapply(TTSgroups, function(idx){
+    
+    data.frame(
+      
+      Gene = TranscriptTable$Gene[idx[1]],
+      
+      Chr = TranscriptTable$Chr[idx[1]],
+      
+      Strand = TranscriptTable$Strand[idx[1]],
+      
+      Coordinate = TranscriptTable$TTS[idx[1]],
+      
+      TranscriptIDs = paste(
+        TranscriptTable$Transcript[idx],
+        collapse = ","
+      ),
+      
+      stringsAsFactors = FALSE
+      
+    )
+    
+  })
+)
+
+rownames(TTSLandmarks) <- NULL
+
+############################################################
+## Gene ranges
+############################################################
+
+GeneGR <- GRanges(
+  
+  seqnames = seqnames(B73Genes),
+  
+  ranges = ranges(B73Genes),
+  
+  strand = strand(B73Genes),
+  
+  Gene = as.character(B73Genes$ID)
+  
+)
+
+############################################################
+## TSS landmarks
+############################################################
+
+TSSgr <- GRanges(
+  
+  seqnames = TSSLandmarks$Chr,
+  
+  ranges = IRanges(
+    TSSLandmarks$Coordinate,
+    TSSLandmarks$Coordinate
+  ),
+  
+  strand = TSSLandmarks$Strand,
+  
+  Gene = TSSLandmarks$Gene,
+  
+  TranscriptIDs = TSSLandmarks$TranscriptIDs
+  
+)
+
+############################################################
+## TTS landmarks
+############################################################
+
+TTSgr <- GRanges(
+  
+  seqnames = TTSLandmarks$Chr,
+  
+  ranges = IRanges(
+    TTSLandmarks$Coordinate,
+    TTSLandmarks$Coordinate
+  ),
+  
+  strand = TTSLandmarks$Strand,
+  
+  Gene = TTSLandmarks$Gene,
+  
+  TranscriptIDs = TTSLandmarks$TranscriptIDs
+  
+)
+
+############################################################
+## Split annotation by strand
+############################################################
+
+GenePlus <- GeneGR[strand(GeneGR) == "+"]
+GeneMinus <- GeneGR[strand(GeneGR) == "-"]
+
+TSSPlus <- TSSgr[strand(TSSgr) == "+"]
+TSSMinus <- TSSgr[strand(TSSgr) == "-"]
+
+TTSPlus <- TTSgr[strand(TTSgr) == "+"]
+TTSMinus <- TTSgr[strand(TTSgr) == "-"]
+
+cat(length(GenePlus), "plus-strand genes\n")
+cat(length(GeneMinus), "minus-strand genes\n\n")
+
+cat(length(TSSPlus), "plus-strand TSS landmarks\n")
+cat(length(TSSMinus), "minus-strand TSS landmarks\n\n")
+
+cat(length(TTSPlus), "plus-strand TTS landmarks\n")
+cat(length(TTSMinus), "minus-strand TTS landmarks\n")
+
+
+
+############################################################
+## Find transcript landmarks associated with a hotspot
+############################################################
+
+############################################################
+## Find transcript landmarks associated with a hotspot
+############################################################
+
+findLandmarks <- function(
+    hs,
+    Landmark = c("TSS","TTS")
+){
+  
+  Landmark <- match.arg(Landmark)
+  
+  ########################################################
+  ## Does hotspot overlap any genes?
+  ########################################################
+  
+  hits <- subjectHits(findOverlaps(hs, GeneGR))
+  
+  ##------------------------------------------------------
+  ## Multiple genes
+  ##------------------------------------------------------
+  
+  if(length(hits) > 1){
+    
+    return(list(
+      
+      Assignment = "multi_gene",
+      
+      Landmarks = NULL
+      
+    ))
+    
+  }
+  
+  ##------------------------------------------------------
+  ## Genic hotspot
+  ##------------------------------------------------------
+  
+  if(length(hits) == 1){
+    
+    gene.id <- GeneGR$Gene[hits]
+    
+    if(Landmark == "TSS"){
+      
+      LM <- TSSgr[TSSgr$Gene == gene.id]
+      
+    }else{
+      
+      LM <- TTSgr[TTSgr$Gene == gene.id]
+      
+    }
+    
+    return(list(
+      
+      Assignment = "genic",
+      
+      Landmarks = LM
+      
+    ))
+    
+  }
+  
+  ########################################################
+  ## Intergenic hotspot
+  ########################################################
+  
+  if(Landmark == "TSS"){
+    
+    plus.idx  <- follow(hs, TSSPlus)
+    minus.idx <- precede(hs, TSSMinus)
+    
+    plus.gr  <- if(is.na(plus.idx)) NULL else TSSPlus[plus.idx]
+    minus.gr <- if(is.na(minus.idx)) NULL else TSSMinus[minus.idx]
+    
+  }else{
+    
+    plus.idx  <- precede(hs, TTSPlus)
+    minus.idx <- follow(hs, TTSMinus)
+    
+    plus.gr  <- if(is.na(plus.idx)) NULL else TTSPlus[plus.idx]
+    minus.gr <- if(is.na(minus.idx)) NULL else TTSMinus[minus.idx]
+    
+  }
+  
+  ########################################################
+  ## Choose nearest landmark
+  ########################################################
+  
+  if(is.null(plus.gr) && is.null(minus.gr)){
+    
+    LM <- NULL
+    
+  }else if(is.null(plus.gr)){
+    
+    LM <- minus.gr
+    
+  }else if(is.null(minus.gr)){
+    
+    LM <- plus.gr
+    
+  }else{
+    
+    d.plus <- as.numeric(distance(hs, plus.gr))
+    d.minus <- as.numeric(distance(hs, minus.gr))
+    
+    LM <- if(d.plus <= d.minus) plus.gr else minus.gr
+    
+  }
+  
+  return(list(
+    
+    Assignment = "intergenic",
+    
+    Landmarks = LM
+    
+  ))
+  
+}
+
+
+############################################################
+## Calculate signed distances to transcript landmarks
+############################################################
+
+landmarkDistances <- function(hs, Landmarks){
+  
+  if(is.null(Landmarks) || length(Landmarks) == 0)
+    return(NULL)
+  
+  distances <- numeric(length(Landmarks))
+  
+  for(i in seq_along(Landmarks)){
+    
+    coord <- start(Landmarks)[i]
+    strand <- as.character(strand(Landmarks)[i])
+    
+    if(strand == "+"){
+      
+      ## hotspot upstream
+      if(end(hs) < coord){
+        
+        distances[i] <- end(hs) - coord
+        
+        ## hotspot downstream
+      }else if(start(hs) > coord){
+        
+        distances[i] <- start(hs) - coord
+        
+        ## overlap
+      }else{
+        
+        distances[i] <- 0
+        
+      }
+      
+    }else{
+      
+      ## Reverse transcriptional space
+      
+      if(start(hs) > coord){
+        
+        distances[i] <- coord - start(hs)
+        
+      }else if(end(hs) < coord){
+        
+        distances[i] <- coord - end(hs)
+        
+      }else{
+        
+        distances[i] <- 0
+        
+      }
+      
+    }
+    
+  }
+  
+  data.frame(
+    
+    Gene = Landmarks$Gene,
+    
+    TranscriptIDs = Landmarks$TranscriptIDs,
+    
+    Distance = distances,
+    
+    stringsAsFactors = FALSE
+    
+  )
+  
+}
+
+############################################################
+## Initialize output
+############################################################
+
+TranscriptDistances <- data.frame(
+  
+  Assignment = rep(NA_character_, length(HotSpotsGR)),
+  
+  TSS_gene = rep(NA_character_, length(HotSpotsGR)),
+  TSS_transcripts = rep(NA_character_, length(HotSpotsGR)),
+  TSS_distance = rep(NA_character_, length(HotSpotsGR)),
+  
+  TTS_gene = rep(NA_character_, length(HotSpotsGR)),
+  TTS_transcripts = rep(NA_character_, length(HotSpotsGR)),
+  TTS_distance = rep(NA_character_, length(HotSpotsGR)),
+  
+  row.names = names(HotSpotsGR),
+  
+  stringsAsFactors = FALSE
+  
+)
+
+############################################################
+## Annotate hotspots
+############################################################
+
+for(i in seq_along(HotSpotsGR)){
+  
+  hs <- HotSpotsGR[i]
+  
+  ########################################################
+  ## TSS annotation
+  ########################################################
+  
+  TSS <- findLandmarks(
+    hs,
+    Landmark = "TSS"
+  )
+  
+  ########################################################
+  ## TTS annotation
+  ########################################################
+  
+  TTS <- findLandmarks(
+    hs,
+    Landmark = "TTS"
+  )
+  
+  ########################################################
+  ## Assignment
+  ########################################################
+  
+  ## Should be identical for TSS and TTS
+  stopifnot(TSS$Assignment == TTS$Assignment)
+  TranscriptDistances$Assignment[i] <- TSS$Assignment
+  
+  ########################################################
+  ## TSS
+  ########################################################
+  
+  if(!is.null(TSS$Landmarks)){
+    
+    TSSdist <- landmarkDistances(
+      hs,
+      TSS$Landmarks
+    )
+    
+    ## Sanity check
+    stopifnot(length(unique(TSSdist$Gene)) == 1)
+    
+    TranscriptDistances$TSS_gene[i] <-
+      unique(TSSdist$Gene)
+    
+    TranscriptDistances$TSS_transcripts[i] <-
+      paste(
+        TSSdist$TranscriptIDs,
+        collapse = ";"
+      )
+    
+    TranscriptDistances$TSS_distance[i] <-
+      paste(
+        TSSdist$Distance,
+        collapse = ","
+      )
+    
+  }
+  ########################################################
+  ## TTS
+  ########################################################
+  
+  if(!is.null(TTS$Landmarks)){
+    
+    TTSdist <- landmarkDistances(
+      hs,
+      TTS$Landmarks
+    )
+    
+    ## Sanity check
+    stopifnot(length(unique(TTSdist$Gene)) == 1)
+    
+    TranscriptDistances$TTS_gene[i] <-
+      unique(TTSdist$Gene)
+    
+    TranscriptDistances$TTS_transcripts[i] <-
+      paste(
+        TTSdist$TranscriptIDs,
+        collapse = ";"
+      )
+    
+    TranscriptDistances$TTS_distance[i] <-
+      paste(
+        TTSdist$Distance,
+        collapse = ","
+      )
+    
+  }
+  
+  if(i %% 1000 == 0)
+    cat(i, "hotspots processed\n")
+  
+}
+rangeDistance <- function(x){
+  
+  if(is.na(x))
+    return(NA_real_)
+  
+  vals <- as.numeric(strsplit(x, ",", fixed = TRUE)[[1]])
+  
+  diff(range(vals))
+}
+TranscriptDistances$TSS_range <- vapply(
+  TranscriptDistances$TSS_distance,
+  rangeDistance,
+  numeric(1)
+)
+
+
+############################################################
+## Select most upstream TSS and most downstream TTS
+############################################################
+
+selectExtremeDistance <- function(x, direction = c("max", "min")) {
+  
+  direction <- match.arg(direction)
+  
+  if(is.na(x))
+    return(NA_real_)
+  
+  vals <- as.numeric(
+    strsplit(x, ",", fixed = TRUE)[[1]]
+  )
+  
+  vals <- vals[is.finite(vals)]
+  
+  if(length(vals) == 0)
+    return(NA_real_)
+  
+  if(direction == "max") {
+    max(vals)
+  } else {
+    min(vals)
+  }
+}
+
+
+############################################################
+## Assign final TSS and TTS distances
+############################################################
+
+# Most upstream (5') TSS
+HotSpots$TSS_distance <- vapply(
+  TranscriptDistances$TSS_distance,
+  selectExtremeDistance,
+  numeric(1),
+  direction = "max"
+)
+
+# Most downstream (3') TTS
+HotSpots$TTS_distance <- vapply(
+  TranscriptDistances$TTS_distance,
+  selectExtremeDistance,
+  numeric(1),
+  direction = "min"
+)
+
+HotSpots$Gene_assignment <- TranscriptDistances$Assignment
+
+countDistances <- function(x) {
+  
+  if (is.na(x))
+    return(0L)
+  
+  length(strsplit(x, ",", fixed = TRUE)[[1]])
+}
+
+HotSpots$TSS_count <- vapply(
+  TranscriptDistances$TSS_distance,
+  countDistances,
+  integer(1)
+)
+
+HotSpots$TTS_count <- vapply(
+  TranscriptDistances$TTS_distance,
+  countDistances,
+  integer(1)
+)
+
+HotSpots$TSS_range=TranscriptDistances$TSS_range
+
+MultiGene <- HotSpots$Gene_assignment == "multi_gene"
+
+HotSpots$TSS_count[MultiGene] <- NA_integer_
+HotSpots$TTS_count[MultiGene] <- NA_integer_
+
+
+
+
+save(HotSpots, file= "HotSpots_Updated_9-28-26.rda")
+
+
+####Make HotSpots bed File
+HotSpotsBED <- data.frame(
+  chr = HotSpots$chr,
+  start = HotSpots$start - 1,
+  end = HotSpots$end,
+  name = rownames(HotSpots),
+  score = as.numeric(HotSpots$insertions)
+)
+
+write.table(
+  HotSpotsBED,
+  file = "HotSpots.bed",
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+
+library(GenomicRanges)
+library(rtracklayer)
+
+## Parameters
+WindowSize <- 500
+EffectiveGenomeSize <- 2182075994
+
+## Counts → presence/absence
+MuBinary <- (MuCounts > 0) * 1
+
+## Tissue-level presence/absence
+tissues <- c("Endosperm", "Pollen", "Root", "Leaf")
+tissue_cols <- lapply(tissues, \(x) grep(paste0("_", substr(x, 1, 1), "$"),
+                                         colnames(MuBinary), value = TRUE))
+
+tissue_bin <- lapply(tissue_cols, \(x)
+                     as.numeric(rowSums(MuBinary[, x, drop = FALSE]) > 0)
+)
+
+names(tissue_bin) <- tissues
+
+## All non-MI samples
+All <- colnames(MuBinary)[!grepl("MI", colnames(MuBinary))]
+tissue_bin$All <- rowSums(MuBinary[, All, drop = FALSE])
+
+## Parse insertion coordinates
+coords <- rownames(MuCounts)
+chr <- sub(":.*", "", coords)
+pos <- sub(".*:", "", coords)
+mid <- round((as.numeric(sub(",.*", "", pos)) +
+                as.numeric(sub(".*,", "", pos))) / 2)
+
+## Genome lengths
+fai <- read.table("~/Downloads/Zm-B73-REFERENCE-NAM-5.0.fa.gz.fai")
+seqlengths <- setNames(fai$V2, fai$V1)
+
+## Remove scaffolds
+keep <- chr %in% names(seqlengths)
+chr <- chr[keep]
+mid <- mid[keep]
+tissue_bin <- lapply(tissue_bin, `[`, keep)
+
+## Generate BigWigs
+for (tissue in names(tissue_bin)) {
+  
+  cat("Processing:", tissue, "\n")
+  
+  gr <- GRanges(
+    seqnames = chr,
+    ranges = IRanges(
+      pmax(1, mid - WindowSize / 2),
+      pmin(seqlengths[chr], mid + WindowSize / 2)
+    ),
+    weight = tissue_bin[[tissue]]
+  )
+  
+  cov <- coverage(gr, weight = gr$weight)
+  
+  lambda <- sum(tissue_bin[[tissue]] > 0) *
+    WindowSize / EffectiveGenomeSize
+  
+  export(
+    cov / lambda,
+    paste0(tissue, "_FE_", WindowSize, "bp.bw")
+  )
+}

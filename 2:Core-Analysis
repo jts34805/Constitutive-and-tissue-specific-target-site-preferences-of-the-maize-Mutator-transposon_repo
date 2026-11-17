@@ -1,3 +1,4 @@
+##To reproduce entire analysis, run code in order 1:R-Functions-for-Hotspots, 2:Core-Analysis 3:Code-To-Reproduce-Figures 
 #This file describes analysis beginning with "GSE279993_MuCounts_target_site_preference.csv" (generated as described in Scherer et al., 2025) to generate Locs.rda, and Supplemental Data S1, the R dataframe from which figures were generated. 
 
 #create constants

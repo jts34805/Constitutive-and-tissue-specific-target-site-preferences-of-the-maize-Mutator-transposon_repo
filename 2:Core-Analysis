@@ -58,7 +58,7 @@ HotSpots$size = apply(HotSpots[,2:3], 1, diff) + 1 #add size of hotspot column t
 HotSpots=HotSpots[HotSpots$size>=100,]
 
 #FDR correct the initial called hotspots
-#Nulls was generated using script "HSNulls_Array.R"
+#Nulls was generated using script "MakeNulls" contact schererjustin02@gmail.com if you would like the file "HotSpotNULL_ALL.rda"
 score = function(xx) {
   -ppois(xx[1] - 1, xx[2]*(nrow(Locs)/EffectiveGenomeSize), lower.tail=F, log.p=T)
 }
